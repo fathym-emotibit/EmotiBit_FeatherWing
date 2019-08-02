@@ -5,7 +5,7 @@
 #define SEND_UDP
 //#define SEND_TCP;
 bool sendSerial = false;
-volatile bool sdWrite = true;
+volatile bool sdWrite = false;
 bool sendConsole = false;
 
 #include "EmotiBit.h"
@@ -19,9 +19,12 @@ bool sendConsole = false;
 	#include <avr/power.h> // Required for 16 MHz Adafruit Trinket
 #endif
 
-#define NEOPIN      6
+#define NEOPIN      A1
 #define NUMPIXELS	32
 Adafruit_NeoPixel pixels(NUMPIXELS, NEOPIN, NEO_GRB + NEO_KHZ800);
+unsigned long int neoCount = 0;
+unsigned long int neoTime = 0;
+bool up = true;
 
 SdFat SD;
 
@@ -139,7 +142,6 @@ uint16_t loopCount = 0;
 #define EDA_SAMPLING_DIV 1
 #define TEMPERATURE_SAMPLING_DIV 2
 #define BATTERY_SAMPLING_DIV 60
-#define NEO_SAMPLING_DIV 5
 //#define N_DATA_TYPES 17
 
 bool errorStatus = false;
@@ -198,7 +200,7 @@ void setup() {
 	delay(500);
 
 	Serial.begin(SERIAL_BAUD);
-	while (!Serial);
+	//while (!Serial);
 	Serial.println("Serial started");
 
 	delay(500);
@@ -626,6 +628,7 @@ void parseIncomingMessages() {
 					isLoggableMessage = true;
 				}
 				else if (typeTag.equals("RB")) { // Recording begin
+					stopTimer();
 					isLoggableMessage = true;
 					String datetimeString = receivedMessage.substring(dataStartChar, receivedMessage.length() - 1);
 					// Write the configuration info to json file
@@ -651,6 +654,11 @@ void parseIncomingMessages() {
 					else {
 						Serial.println("Failed to open data file for writing");
 					}
+					sendTimerStart = millis();
+					requestTimestampTimerStart = millis();
+
+					//Serial.println("Free Ram :" + String(FreeRam(), DEC) + " bytes");
+					startTimer(BASE_SAMPLING_FREQ);
 				}
 				else if (typeTag.equals("RE")) { // Recording end
 					isLoggableMessage = true;
@@ -728,15 +736,13 @@ bool performTimestampSyncing() {
 		parseIncomingMessages();
 	}
 }
-unsigned long int neoCount = 0;
-unsigned long int neoTime = 0;
-bool up = true;
+
 void loop() {
 #ifdef DEBUG_GET_DATA
 	Serial.println("loop()");
 #endif // DEBUG
 #if 1
-	neoTime = millis();
+	//neoTime = millis();
 	if ((neoCount < 8) && (up == true)) {
 		neoCount++;
 	}
@@ -761,8 +767,8 @@ void loop() {
 
 		pixels.show();
 	}
-	Serial.print("NeoTime: ");
-	Serial.println(millis() - neoTime);
+	//Serial.print("NeoTime: ");
+	//Serial.println(millis() - neoTime);
 
 //#endif
 	updateWiFi();
@@ -936,20 +942,6 @@ void readSensors() {
 		batteryCounter = 0;
 	}
 	batteryCounter++;
-#if 0
-	static uint16_t neoCounter;
-	if (neoCounter > NEO_SAMPLING_DIV) {
-		for (int i = 0; i < NUMPIXELS; i++) { // For each pixel...
-
-	// pixels.Color() takes RGB values, from 0,0,0 up to 255,255,255
-	// Here we're using a moderately bright green color:
-			pixels.setPixelColor(i, pixels.Color(0, 7, 8));
-
-			pixels.show();
-		}
-	}
-		neoCounter++;
-#endif
 }
 
 void setTimerFrequency(int frequencyHz) {
