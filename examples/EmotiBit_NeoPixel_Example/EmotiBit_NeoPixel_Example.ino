@@ -26,6 +26,33 @@ unsigned long int neoCount = 0;
 unsigned long int neoTime = 0;
 bool up = true;
 
+void neoPixelColorShift() {
+	//neoTime = millis();
+	if ((neoCount < 8) && (up == true)) {
+		neoCount++;
+	}
+	else if (neoCount == 8) {
+		neoCount--;
+		up = false;
+	}
+	else if (neoCount == 0) {
+		neoCount++;
+		up = true;
+	}
+	else {
+		neoCount--;
+	}
+	
+	//neoTime = millis();
+	for (int i = 0; i < NUMPIXELS; i++) {
+		//Takes RGB values, or RGBW, from (0,0,0) - (255,255,255)
+		pixels.setPixelColor(i, pixels.Color(neoCount, 4 + neoCount, 8 - neoCount));
+		pixels.show();
+	}
+	//Serial.print("NeoTime: ");
+	//Serial.println(millis() - neoTime);   //>40ms
+}
+
 SdFat SD;
 
 typedef struct EmotibitConfig {
@@ -741,36 +768,9 @@ void loop() {
 #ifdef DEBUG_GET_DATA
 	Serial.println("loop()");
 #endif // DEBUG
-#if 1
-	//neoTime = millis();
-	if ((neoCount < 8) && (up == true)) {
-		neoCount++;
-	}
-	else if (neoCount == 8) {
-		neoCount--;
-		up = false;
-	}
-	else if (neoCount == 0) {
-		neoCount++;
-		up = true;
-	}
-	else{
-		neoCount--;
-	}
-#endif
-	//neoTime = millis();
-	for (int i = 0; i < NUMPIXELS; i++) { // For each pixel...
 
-	// pixels.Color() takes RGB values, from 0,0,0 up to 255,255,255
-	// Here we're using a moderately bright green color:
-		pixels.setPixelColor(i, pixels.Color(neoCount, 4+neoCount, 8-neoCount));
+	neoPixelColorShift();
 
-		pixels.show();
-	}
-	//Serial.print("NeoTime: ");
-	//Serial.println(millis() - neoTime);
-
-//#endif
 	updateWiFi();
 
 	parseIncomingMessages();
