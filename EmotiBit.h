@@ -22,7 +22,7 @@
 #include "EdaCorrection.h"
 #include "EmotiBitVersionController.h"
 #include "DigitalFilter.h"
-
+#include <Adafruit_ADS1X15.h>
 
 class EmotiBit {
   
@@ -34,11 +34,12 @@ public:
 		ACUTE,
 		ISR_CORRECTION_UPDATE,
 		ISR_CORRECTION_TEST,
+		TEST_ADS1115,
 		length
 	};
 
 	String firmware_version = "1.2.77";
-	TestingMode testingMode = TestingMode::NONE;
+	TestingMode testingMode = TestingMode::TEST_ADS1115;
 	const bool DIGITAL_WRITE_DEBUG = false;
 
 	bool _debugMode = false;
@@ -221,6 +222,7 @@ public:
 	NCP5623 led;
 	MLX90632 thermopile;
 	EdaCorrection *edaCorrection = nullptr;
+	Adafruit_ADS1115 ads;
 
 	int _emotiBitSystemConstants[(int)SystemConstants::COUNT];
 
@@ -432,6 +434,7 @@ public:
   int8_t updateIMUData();                /**< Read any available IMU data from the sensor FIFO into the inputBuffers */
 	int8_t updatePPGData();                /**< Read any available PPG data from the sensor FIFO into the inputBuffers */
 	int8_t updateEDAData();                /**< Take EDA reading and put into the inputBuffer */
+	float getEdaFromAds(int mode = 0);
 	int8_t updateTempHumidityData();       /**< Read any available temperature and humidity data into the inputBuffers */
 	int8_t updateThermopileData();         /**< Read Thermopile data into the buffers*/
 	int8_t updateBatteryVoltageData();     /**< Take battery voltage reading and put into the inputBuffer */
@@ -516,7 +519,8 @@ private:
 	// ToDo: add assignment for dynamic allocation;
 	// 	**** WARNING **** THIS MUST MATCH THE SAMPLING DIVS ETC
 	BufferFloat edlBuffer = BufferFloat(24);
-	BufferFloat edrBuffer = BufferFloat(24);	
+	BufferFloat edrBuffer = BufferFloat(24);
+	BufferFloat edaAdsBuffer = BufferFloat(24);
 	BufferFloat temperatureBuffer = BufferFloat(4);	
 	BufferFloat humidityBuffer = BufferFloat(4);
 	BufferFloat batteryVoltageBuffer = BufferFloat(8);

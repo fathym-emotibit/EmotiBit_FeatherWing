@@ -348,6 +348,17 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	Serial.print("LED Driver Current Level = "); Serial.println(_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT]);
 
 	Serial.println("\nSensor setup:");
+
+	// Initializing ADS 
+	Serial.println("Initializing ADS1115....");
+	ads.setDataRate(RATE_ADS1115_475SPS);
+	ads.setGain(GAIN_TWO);        // 2x gain   +/- 2.048V  1 bit = 1mV      0.0625mV
+	ads.begin(0x48, _EmotiBit_i2c);
+	_EmotiBit_i2c->setClock(i2cRate);
+	//Serial.println("...setting PIO_SERCOM");
+	pinPeripheral(EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN, PIO_SERCOM);
+	pinPeripheral(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN, PIO_SERCOM);
+
 	// setup LED DRIVER
 	Serial.println("Initializing NCP5623....");
 	led.begin(*_EmotiBit_i2c);
@@ -1204,6 +1215,27 @@ uint8_t EmotiBit::update()
 	}
 }
 
+float EmotiBit::getEdaFromAds(int mode)
+{
+	int16_t adc = 0;
+	float volts = 0;
+	if (mode == 0)
+	{
+		// for single ended mode
+		adc = ads.readADC_SingleEnded(0);
+		if (adc == -1)
+			return -10;// unrealistic voltage
+		volts = ads.computeVolts(adc);
+	}
+	else
+	{
+		// for differential mode
+		adc = ads.readADC_Differential_0_1();
+		volts = ads.computeVolts(adc);
+	}
+	return volts;
+}
+
 int8_t EmotiBit::updateEDAData() 
 {
 #ifdef DEBUG
@@ -1213,17 +1245,23 @@ int8_t EmotiBit::updateEDAData()
 	static float edlTemp;	// Electrodermal Level in Volts
 	static float edrTemp;	// Electrodermal Response in Volts
 	static float edaTemp;	// Electrodermal Activity in Volts
+	static float edaFromAds; // EDA in volts
   static float sclTemp;	// Skin Conductance Level in uSeimens
 	static float scrTemp;	// Skin Conductance Response in uSeimens
 	static bool edlClipped = false;
 	static bool edrClipped = false;
-
+	
 	// ToDo: Optimize calculations for EDA
 
 	// Check EDL and EDR voltages for saturation
 	edlTemp = analogRead(_edlPin);
 	edrTemp = analogRead(_edrPin);
 	
+	// get the data from ADS1115
+	if (testingMode == TestingMode::TEST_ADS1115)
+	{
+		edaFromAds = getEdaFromAds(); // pass 1 for differential mode
+	}
 	// Correct for offset correction only when not in ISR_CORRECTION_UPDATE
 	if (testingMode != TestingMode::ISR_CORRECTION_UPDATE)
 	{
@@ -1234,7 +1272,10 @@ int8_t EmotiBit::updateEDAData()
 	// Add data to buffer for sample averaging (oversampling)
 	edlBuffer.push_back(edlTemp);
 	edrBuffer.push_back(edrTemp);
-
+	if (testingMode == TestingMode::TEST_ADS1115)
+	{
+		edaAdsBuffer.push_back(edaFromAds);
+	}
 	// ToDo: move adc clipping limits to setup()
 	static const int adcClippingLowerLim = 20;
 	static const int adcClippingUpperLim = adcRes - 20;
@@ -1247,8 +1288,7 @@ int8_t EmotiBit::updateEDAData()
 		status = status | (int8_t) Error::DATA_CLIPPING;
 	}
 	// Check for data clipping
-	if (edrTemp < adcClippingLowerLim	|| edrTemp > adcClippingUpperLim
-		) 
+	if (edrTemp < adcClippingLowerLim	|| edrTemp > adcClippingUpperLim) 
 	{
 		edrClipped = true;
 		status = status | (int8_t)Error::DATA_CLIPPING;
@@ -1262,6 +1302,10 @@ int8_t EmotiBit::updateEDAData()
 		// Perform data averaging
 		edlTemp = average(edlBuffer);
 		edrTemp = average(edrBuffer);
+		if (testingMode == TestingMode::TEST_ADS1115)
+		{
+			edaFromAds = average(edaAdsBuffer);// already in volts
+		}
 		// store raw values is case we need to transmit that over wifi
 		edlRaw = edlTemp;
 		edrRaw = edrTemp;
@@ -1282,12 +1326,28 @@ int8_t EmotiBit::updateEDAData()
 			edrTx = edrTemp;
 		}
 
-		// send raw EDL values
-		pushData(EmotiBit::DataType::EDL, edlTx, &edlBuffer.timestamp);
-		if (edlClipped) {
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::EDL, &edlBuffer.timestamp);
+		if (testingMode == TestingMode::TEST_ADS1115)
+		{
+			/*
+			if (edaFromAds - vRef1 < 0.000086f)
+			{
+				edaFromAds = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
+			}
+			else
+			{
+				edaFromAds = vRef1 / ((edaFeedbackAmpR * (edaFromAds - vRef1)) - (_edaSeriesResistance * vRef1));
+			}
+			*/
+			pushData(EmotiBit::DataType::EDL, edaFromAds, &edlBuffer.timestamp);
 		}
-
+		else
+		{
+			// send raw EDL values
+			pushData(EmotiBit::DataType::EDL, edlTx, &edlBuffer.timestamp);
+			if (edlClipped) {
+				pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::EDL, &edlBuffer.timestamp);
+			}
+		}
 		pushData(EmotiBit::DataType::EDR, edrTx, &edrBuffer.timestamp);
 		if (edrClipped) {
 			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::EDR, &edrBuffer.timestamp);
@@ -1308,18 +1368,18 @@ int8_t EmotiBit::updateEDAData()
 		edaTemp = edaTemp + edlTemp;                     // Add EDR to EDL in Volts
 
 		//edaTemp = (_vcc - edaTemp) / edaVDivR * 1000000.f;						// Convert EDA voltage to uSeimens
-
-		if (edaTemp - vRef1 < 0.000086f)
+		if (testingMode != TestingMode::TEST_ADS1115)
 		{
-			edaTemp = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
+			if (edaTemp - vRef1 < 0.000086f)
+			{
+				edaTemp = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
+			}
+			else
+			{
+				edaTemp = vRef1 / ((edaFeedbackAmpR * (edaTemp - vRef1)) - (_edaSeriesResistance * vRef1));
+			}
+			edaTemp = edaTemp * 1000000.f; // Convert to uSiemens
 		}
-		else
-		{
-			edaTemp = vRef1 / ((edaFeedbackAmpR * (edaTemp - vRef1)) - (_edaSeriesResistance * vRef1));
-		}
-
-		edaTemp = edaTemp * 1000000.f; // Convert to uSiemens
-
 
 		// Add to data double buffer
 		status = status | pushData(EmotiBit::DataType::EDA, edaTemp, &edrBuffer.timestamp);
@@ -1330,6 +1390,7 @@ int8_t EmotiBit::updateEDAData()
 		// Clear the averaging buffers
 		edlBuffer.clear();
 		edrBuffer.clear();
+		edaAdsBuffer.clear();
 		edlClipped = false;
 		edrClipped = false;
 	}
