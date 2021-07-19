@@ -1231,9 +1231,10 @@ float EmotiBit::getEdaFromAds(int mode)
 	{
 		// for differential mode
 		adc = ads.readADC_Differential_0_1();
-		volts = ads.computeVolts(adc);
+		//adc += 32768; // adding the offset to bring -ve measurememnts to positive
+		//volts = ads.computeVolts(adc);
 	}
-	return volts;
+	return adc;
 }
 
 int8_t EmotiBit::updateEDAData() 
@@ -1251,6 +1252,14 @@ int8_t EmotiBit::updateEDAData()
 	static bool edlClipped = false;
 	static bool edrClipped = false;
 	
+	// for single ended mode
+	//float adc0R = 6877; // measured empirically
+	//float Rfeedback = 4.986940;// Resistance in M Ohms
+
+	// for differential mode
+	static float slope = 0.001372042019;
+	static float intercept = -19455.27737;
+
 	// ToDo: Optimize calculations for EDA
 
 	// Check EDL and EDR voltages for saturation
@@ -1260,7 +1269,7 @@ int8_t EmotiBit::updateEDAData()
 	// get the data from ADS1115
 	if (testingMode == TestingMode::TEST_ADS1115)
 	{
-		edaFromAds = getEdaFromAds(); // pass 1 for differential mode
+		edaFromAds = getEdaFromAds(1); // pass 1 for differential mode
 	}
 	// Correct for offset correction only when not in ISR_CORRECTION_UPDATE
 	if (testingMode != TestingMode::ISR_CORRECTION_UPDATE)
@@ -1328,16 +1337,17 @@ int8_t EmotiBit::updateEDAData()
 
 		if (testingMode == TestingMode::TEST_ADS1115)
 		{
-			/*
-			if (edaFromAds - vRef1 < 0.000086f)
+			
+			edaFromAds = (edaFromAds - intercept) / slope; // in Resistace(ohms)
+			if(edaFromAds < 2000) // if less than 2K Ohms
 			{
-				edaFromAds = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
-			}
+				edaFromAds = 500; //in uS
+			}	
 			else
 			{
-				edaFromAds = vRef1 / ((edaFeedbackAmpR * (edaFromAds - vRef1)) - (_edaSeriesResistance * vRef1));
+				edaFromAds = (1 / edaFromAds) * 1000000; // in uS
 			}
-			*/
+			
 			pushData(EmotiBit::DataType::EDL, edaFromAds, &edlBuffer.timestamp);
 		}
 		else
@@ -1368,19 +1378,16 @@ int8_t EmotiBit::updateEDAData()
 		edaTemp = edaTemp + edlTemp;                     // Add EDR to EDL in Volts
 
 		//edaTemp = (_vcc - edaTemp) / edaVDivR * 1000000.f;						// Convert EDA voltage to uSeimens
-		if (testingMode != TestingMode::TEST_ADS1115)
+		
+		if (edaTemp - vRef1 < 0.000086f)
 		{
-			if (edaTemp - vRef1 < 0.000086f)
-			{
-				edaTemp = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
-			}
-			else
-			{
-				edaTemp = vRef1 / ((edaFeedbackAmpR * (edaTemp - vRef1)) - (_edaSeriesResistance * vRef1));
-			}
-			edaTemp = edaTemp * 1000000.f; // Convert to uSiemens
+			edaTemp = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
 		}
-
+		else
+		{
+			edaTemp = vRef1 / ((edaFeedbackAmpR * (edaTemp - vRef1)) - (_edaSeriesResistance * vRef1));
+		}
+		edaTemp = edaTemp * 1000000.f; // Convert to uSiemens
 		// Add to data double buffer
 		status = status | pushData(EmotiBit::DataType::EDA, edaTemp, &edrBuffer.timestamp);
 		if (edlClipped || edrClipped) {
