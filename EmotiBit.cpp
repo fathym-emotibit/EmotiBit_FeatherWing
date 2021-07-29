@@ -1257,8 +1257,8 @@ int8_t EmotiBit::updateEDAData()
 	//float Rfeedback = 4.986940;// Resistance in M Ohms
 
 	// for differential mode
-	static float slope = 0.001372042019;
-	static float intercept = -19455.27737;
+	static float slope = 0.001369184735;
+	static float intercept = -19436.78848;
 
 	// ToDo: Optimize calculations for EDA
 
