@@ -1,9 +1,15 @@
 #include "EmotiBit.h"
+#include <math.h>
 
 //FlashStorage(samdFlashStorage, SamdStorageAdcValues);
 
 EmotiBit* myEmotiBit = nullptr;
 void(*onInterruptCallback)(void);
+
+#ifdef ARDUINO_FEATHER_ESP32
+TaskHandle_t EmotiBitDataAcquisition;
+hw_timer_t * timer = NULL;
+#endif
 
 EmotiBit::EmotiBit() 
 {
@@ -17,11 +23,15 @@ bool EmotiBit::setSamplingRates(SamplingRates s)
 	_samplingRates.accelerometer = 25.f * pow(2.f, ((float)imuSettings.acc_odr - 6.f));	// See lookup table in BMI160 datasheet
 	_samplingRates.gyroscope = 25.f * pow(2.f, ((float)imuSettings.gyr_odr - 6.f));		// See lookup table in BMI160 datasheet
 	_samplingRates.magnetometer = 25.f * pow(2.f, ((float)imuSettings.mag_odr - 6.f));	// See lookup table in BMI160 datasheet
+	// ToDo: implement logic to determine return val
+	return true;
 }
 
 bool EmotiBit::setSamplesAveraged(SamplesAveraged s) 
 {
 	_samplesAveraged = s;
+	// ToDo: implement logic to determine return val
+	return true;
 }
 
 bool EmotiBit::getBit(uint8_t num, uint8_t bit) 
@@ -89,55 +99,262 @@ void EmotiBit::bmm150ReadTrimRegisters()
 	bmm150TrimData.dig_xyz1 = (uint16_t)(temp_msb | trim_xy1xy2[4]);
 }
 
-uint8_t EmotiBit::setup(size_t bufferCapacity)
+uint8_t EmotiBit::setup(String firmwareVariant)
 {
+	// Update firmware_variant information
+	firmware_variant = firmwareVariant;
+	// ToDo: find a way to extract variant string from build flag
+#ifdef EMOTIBIT_PPG_100HZ
+	firmware_variant = firmware_variant + "_PPG_100Hz";
+#endif
+
+#ifdef ARDUINO_FEATHER_ESP32
+	esp_bt_controller_disable();
+	// ToDo: assess similarity with btStop();
+	setCpuFrequencyMhz(CPU_HZ / 1000000); // 80MHz has been tested working to save battery life
+#endif
+
 	EmotiBitVersionController emotiBitVersionController;
+	//EmotiBitUtilities::printFreeRAM("Begining of setup", 1);
+	Serial.print("I2C data pin: "); Serial.println(EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN);
+	Serial.print("I2C clk pin: "); Serial.println(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN);
+	Serial.print("hibernate pin: "); Serial.println(EmotiBitVersionController::HIBERNATE_PIN);
+	Serial.print("chip sel pin: "); Serial.println(EmotiBitVersionController::SD_CARD_CHIP_SEL_PIN);
+	Barcode barcode;
+	barcode.rawCode = "";
+	String factoryTestSerialOutput;
+	factoryTestSerialOutput.reserve(150);
+	factoryTestSerialOutput += EmotiBitFactoryTest::MSG_START_CHAR;
+	uint32_t now = millis();
+	Serial.print("Firmware version: ");
+	Serial.println(firmware_version);
+	Serial.print("firmware_variant: ");
+	Serial.println(firmware_variant);
+	while (!Serial.available() && millis() - now < 2000)
+	{
+	}
+	while (Serial.available())
+	{
+		char input;
+		input = Serial.read();
+		if (input == 'R')
+		{
+			restartMcu();
+		}
+		else if (input == EmotiBitFactoryTest::INIT_FACTORY_TEST)
+		{
+			uint32_t waitStarForBarcode = millis();
+			testingMode = TestingMode::FACTORY_TEST;
+			String ackString;
+			ackString += EmotiBitFactoryTest::MSG_START_CHAR;
+			EmotiBitFactoryTest::updateOutputString(ackString, EmotiBitFactoryTest::TypeTag::FIRMWARE_VERSION, firmware_version.c_str());
+			ackString = ackString.substring(0, ackString.length() - 1);
+			ackString += EmotiBitFactoryTest::MSG_TERM_CHAR;
+			Serial.print(ackString);
+
+			Serial.println("\nEntered FACTORY TEST MODE");
+			bool barcodeReceived = false;
+			while (Serial.available() || !barcodeReceived)
+			{
+				char input;
+				input = Serial.read();
+				if (input == EmotiBitFactoryTest::MSG_START_CHAR)
+				{
+					String msg = Serial.readStringUntil(EmotiBitFactoryTest::MSG_TERM_CHAR);
+					Serial.print("Barcode msg: ");
+					Serial.println(msg);
+					String msgTypeTag = msg.substring(0, 2);
+					if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::EMOTIBIT_BARCODE))
+					{
+						EmotiBitPacket::getPacketElement(msg, barcode.rawCode, 3);
+						barcodeReceived = true;
+						Serial.print("barcode.rawCode: ");
+						Serial.println(barcode.rawCode);
+					}
+					else
+					{
+						Serial.println("Barcode not received in the correct packet format.");
+					}
+				}
+				if (millis() - waitStarForBarcode > 3000)
+					break;
+			}
+		}
+		else
+		{
+			// do nothing. Junk input.
+		}
+		// remove any other char in the buffer before proceeding
+		while (Serial.available())
+		{
+			Serial.read();
+		}
+	}
+	// Added initPinMapping(UNKOWN) to perform basic pin measurements before isEmotiBitReady is successful
+	emotiBitVersionController.initPinMapping(EmotiBitVersionController::EmotiBitVersion::UNKNOWN);
+	// Test code to assess pin states
+	//const int nTestPins = 3;
+	//int testPins[nTestPins] =
+	//{
+	//	emotiBitVersionController.getAssignedPin(EmotiBitPinName::BMI_INT1),
+	//	emotiBitVersionController.getAssignedPin(EmotiBitPinName::BMM_INT),
+	//	emotiBitVersionController.getAssignedPin(EmotiBitPinName::PPG_INT)
+	//};
+	//for (int t = 0; t < nTestPins; t++)
+	//{
+	//	pinMode(testPins[t], INPUT);
+	//	Serial.print("Pin ");
+	//	Serial.print(t);
+	//	Serial.print(": ");
+	//	Serial.println(digitalRead(testPins[t]));
+	//}
+
+	if (emotiBitVersionController.isEmotiBitReady())
+	{
+		Serial.println("EmotiBit ready");
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_READY, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+		}
+	}
+	else
+	{
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_READY, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SETUP_COMPLETE, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			Serial.println(factoryTestSerialOutput);
+		}
+#ifdef ADAFRUIT_FEATHER_M0
+		PORT->Group[PORTA].PINCFG[17].bit.DRVSTR = 1; // Increase SCL pin drive strength to over-power current pulling up
+#endif
+		// Set Feather LED LOW
+		pinMode(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN, OUTPUT);
+		// make sure the pin DRV strength is set to sink appropriate current
+		digitalWrite(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN, LOW);
+		// Not putting EmotiBit to sleep helps with the FW installer process
+
+		// Test code to assess pin states
+		//for (int t = 0; t < nTestPins; t++)
+		//{
+		//	pinMode(testPins[t], INPUT);
+		//	Serial.print("Pin ");
+		//	Serial.print(t);
+		//	Serial.print(": ");
+		//	Serial.println(digitalRead(testPins[t]));
+		//}
+
+		setupFailed("SD-Card not detected", emotiBitVersionController.getAssignedPin(EmotiBitPinName::EMOTIBIT_BUTTON));
+	}
 	bool status = true;
 	if (_EmotiBit_i2c != nullptr)
 	{
 		delete(_EmotiBit_i2c);
 	}
+#ifdef ADAFRUIT_FEATHER_M0
+	Serial.println("Setting up I2C For M0...");
 	_EmotiBit_i2c = new TwoWire(&sercom1, EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN, EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN);
-	// Flush the I2C
-	Serial.print("Setting up I2C....");
 	_EmotiBit_i2c->begin();
-	uint32_t i2cRate = 100000;
-	Serial.print("setting clock to");
-	Serial.print(i2cRate);
-	_EmotiBit_i2c->setClock(i2cRate);
-	Serial.println("...setting PIO_SERCOM");
+	// ToDo: detect if i2c init fails
 	pinPeripheral(EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN, PIO_SERCOM);
 	pinPeripheral(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN, PIO_SERCOM);
-	_version = emotiBitVersionController.detectEmotiBitVersion(_EmotiBit_i2c);
-	// If version is unknown
-	if (_version == EmotiBitVersionController::EmotiBitVersion::UNKNOWN)
+#elif defined ARDUINO_FEATHER_ESP32
+	_EmotiBit_i2c = new TwoWire(1);
+	Serial.println("Setting up I2C For ESP32...");
+	status = _EmotiBit_i2c->begin(EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN, EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN);
+	if (status)
 	{
-		Serial.println("initialization failed.");
-		Serial.println("Things to check:");
-		Serial.println("* is a card inserted?");
-		Serial.println("* is your wiring correct?");
-		Serial.println("Version not detected. stopping execution.");
-		emotiBitVersionController.initConstantMapping(EmotiBitVersionController::EmotiBitVersion::V03B);// Assume the version is V03B to set Hibernate level as Required
-		_hibernatePin = EmotiBitVersionController::HIBERNATE_PIN;
-		hibernate(false);// hibenrate with setup incomplete
+		Serial.println("I2c setup complete");
 	}
-	// If Si-7013 was not detected, hibernate with the estimated version
-	else if (!emotiBitVersionController.versionDetectionComplete && (_version == EmotiBitVersionController::EmotiBitVersion::V02H || _version == EmotiBitVersionController::EmotiBitVersion::V03B))
+	else
 	{
-		Serial.println("Si-7013 not found on EmotiBit. Check I2C wiring.");
-		// Assigning constant so that we can use the System Constant::HIBERNATE_LEVEL in hibernate()
-		emotiBitVersionController.initConstantMapping(_version);
-		_hibernatePin = EmotiBitVersionController::HIBERNATE_PIN;
-		hibernate(false);//hibernate with setup incomplete
+		Serial.println("I2c setup failed");
+	}
+#endif
+	uint32_t i2cRate = 100000;
+	Serial.print("Setting clock to ");
+	Serial.println(i2cRate);
+	_EmotiBit_i2c->setClock(i2cRate);
+
+	if (testingMode == TestingMode::FACTORY_TEST)
+	{
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::I2C_COMM_INIT, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+	}
+	Serial.print("Initializing NVM controller: ");
+	if (_emotibitNvmController.init(*_EmotiBit_i2c))
+	{
+		Serial.println("success");
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_STORAGE, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+		}
+	}
+	else
+	{
+		Serial.println("fail");
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_STORAGE, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SETUP_COMPLETE, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			Serial.println(factoryTestSerialOutput);
+		}
+		setupFailed("EEPROM");
+	}
+	if (testingMode == TestingMode::FACTORY_TEST && barcode.rawCode != "")
+	{
+		// parse the barcode
+		EmotiBitFactoryTest::parseBarcode(&barcode);
+		Serial.print("barcode: ");
+		Serial.println(barcode.rawCode);
+		Serial.print("sku: ");
+		Serial.println(barcode.sku);
+		Serial.print("hwVersion: ");
+		Serial.println(barcode.hwVersion);
+		Serial.print("emotibitSerialNumber: ");
+		Serial.println(barcode.emotibitSerialNumber);
+
+		bool hwValidation, skuValidation = false;
+		if (emotiBitVersionController.validateBarcodeInfo(*(_EmotiBit_i2c), barcode, hwValidation, skuValidation))
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::VERSION_VALIDATION, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SKU_VALIDATION, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			if (!emotiBitVersionController.writeVariantInfoToNvm(_emotibitNvmController, barcode))
+			{
+				sleep(false);
+			}
+		}
+		else
+		{
+			if (hwValidation)
+			{
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::VERSION_VALIDATION, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			}
+			else
+			{
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::VERSION_VALIDATION, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			}
+			if (skuValidation)
+			{
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SKU_VALIDATION, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			}
+			else
+			{
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SKU_VALIDATION, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			}
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SETUP_COMPLETE, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			Serial.println(factoryTestSerialOutput);
+			sleep(false);
+		}
 	}
 
-	if (_version == EmotiBitVersionController::EmotiBitVersion::V01B || _version == EmotiBitVersionController::EmotiBitVersion::V01C)
+	if (!emotiBitVersionController.getEmotiBitVariantInfo(_emotibitNvmController, _hwVersion, emotiBitSku, emotibitSerialNumber, emotibitDeviceId))
 	{
-		Serial.println("This code is not compatible with V01 (Alpha) boards");
-		Serial.println("Download v0.6.0 for Alpha boards");
-		hibernate(false);
+		if (!emotiBitVersionController.detectVariantFromHardware(*(_EmotiBit_i2c), _hwVersion, emotiBitSku))
+		{
+			setupFailed("CANNOT IDENTIFY HARDWARE");
+		}
 	}
-
+	// device ID for V3 and lower will be updated after Temp/Humidity sensor is setup below
 	String fwVersionModifier = "";
 	if (testingMode == TestingMode::ACUTE)
 	{
@@ -149,40 +366,43 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 		fwVersionModifier = "-TC";
 		_debugMode = true;
 	}
-	else if (testingMode == TestingMode::ISR_CORRECTION_UPDATE)
+	else if (testingMode == TestingMode::FACTORY_TEST)
 	{
-		fwVersionModifier = "-ISR_CORR_UPDT";
-		_debugMode = true;
-	}
-	else if (testingMode == TestingMode::ISR_CORRECTION_TEST)
-	{
-		fwVersionModifier = "-ISR_CORR_TEST";
-		_debugMode = true;
+		fwVersionModifier = "-FT";
 	}
 	firmware_version += fwVersionModifier;
 
-	Serial.print("\n\nEmotiBit version: ");
-	Serial.println(EmotiBitVersionController::getHardwareVersion(_version));
+	Serial.print("\n\nEmotiBit HW version: ");
+	Serial.println(EmotiBitVersionController::getHardwareVersion(_hwVersion));
 	Serial.print("Firmware version: ");
 	Serial.println(firmware_version);
-	Serial.println("All Serial inputs must be used with **No Line Ending** option from the serial monitor");
+	Serial.print("firmware_variant: ");
+	Serial.println(firmware_variant);
+	if (testingMode == TestingMode::FACTORY_TEST)
+	{
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::FIRMWARE_VERSION, firmware_version.c_str());
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_VERSION, EmotiBitVersionController::getHardwareVersion(_hwVersion));
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_SERIAL_NUMBER, String(emotibitSerialNumber).c_str());
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::EMOTIBIT_SKU_TYPE, emotiBitSku.c_str());
+	}
+	//Serial.println("All Serial inputs must be used with **No Line Ending** option from the serial monitor");
 
 	bool initResult = false;
 
 	// IMPORTANT. Need pin initialization(Performed below) for emotibit to work
 	// initializing the pin and constant mapping
-	emotiBitVersionController.initPinMapping(_version); // Any unknown version is handled in the version detection code.
-	initResult = emotiBitVersionController.initConstantMapping(_version);
+	emotiBitVersionController.initPinMapping(_hwVersion); // Any unknown version is handled in the version detection code.
+	initResult = emotiBitVersionController.initConstantMapping(_hwVersion);
 	
 	// Constant Mapping fails if NUM_CONSTANTS not updated in versionController Class
 	if (!initResult)
 	{
 		Serial.println("Constant Mapping Failed. Stopping execution");
 		emotiBitVersionController.initConstantMapping(EmotiBitVersionController::EmotiBitVersion::V03B);// Assume the version is V03B to set Hibernate level as Required
-		hibernate(false);// hiberante with setup incomplete
+		setupFailed("CONSTANT MAPPING");
 	}
 
-#ifdef DEBUG
+#if defined(DEBUG)
 	// testing if mapping was successful
 	emotiBitVersionController.echoPinMapping();
 	emotiBitVersionController.echoConstants();
@@ -191,13 +411,8 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	// ToDo: Create a organized way to store class vairables
 	// Set board-specific pins 
 	_batteryReadPin = emotiBitVersionController.getAssignedPin(EmotiBitPinName::BATTERY_READ_PIN);
-	_hibernatePin = emotiBitVersionController.getAssignedPin(EmotiBitPinName::HIBERNATE);
 	buttonPin = emotiBitVersionController.getAssignedPin(EmotiBitPinName::EMOTIBIT_BUTTON);
 	//TODO: Find a better way to swap pin assignments in different modes
-	_edlPin = emotiBitVersionController.getAssignedPin(EmotiBitPinName::EDL);
-	_edrPin = emotiBitVersionController.getAssignedPin(EmotiBitPinName::EDR);
-	_sdCardChipSelectPin = emotiBitVersionController.getAssignedPin(EmotiBitPinName::SD_CARD_CHIP_SELECT);
-
 
 	_emotiBitSystemConstants[(int)SystemConstants::EMOTIBIT_HIBERNATE_LEVEL] = emotiBitVersionController.getSystemConstant(SystemConstants::EMOTIBIT_HIBERNATE_LEVEL);
 	_emotiBitSystemConstants[(int)SystemConstants::EMOTIBIT_HIBERNATE_PIN_MODE] = emotiBitVersionController.getSystemConstant(SystemConstants::EMOTIBIT_HIBERNATE_PIN_MODE);
@@ -217,23 +432,25 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	_adcBits = emotiBitVersionController.getMathConstant(MathConstants::ADC_BITS);
 	adcRes = emotiBitVersionController.getMathConstant(MathConstants::ADC_MAX_VALUE);
 	_vcc = emotiBitVersionController.getMathConstant(MathConstants::VCC);
-	edrAmplification = emotiBitVersionController.getMathConstant(MathConstants::EDR_AMPLIFICATION);
-	edaFeedbackAmpR = emotiBitVersionController.getMathConstant(MathConstants::EDA_FEEDBACK_R);
-	vRef1 = emotiBitVersionController.getMathConstant(MathConstants::VREF1);
-	vRef2 = emotiBitVersionController.getMathConstant(MathConstants::VREF2);
-	_edaSeriesResistance = emotiBitVersionController.getMathConstant(MathConstants::EDA_SERIES_RESISTOR);
+	//edrAmplification = emotiBitVersionController.getMathConstant(MathConstants::EDR_AMPLIFICATION);
+	//edaFeedbackAmpR = emotiBitVersionController.getMathConstant(MathConstants::EDA_FEEDBACK_R);
+	//vRef1 = emotiBitVersionController.getMathConstant(MathConstants::VREF1);
+	//vRef2 = emotiBitVersionController.getMathConstant(MathConstants::VREF2);
+	//_edaSeriesResistance = emotiBitVersionController.getMathConstant(MathConstants::EDA_SERIES_RESISTOR);
 
 	if (!_outDataPackets.reserve(OUT_MESSAGE_RESERVE_SIZE)) {
 		Serial.println("Failed to reserve memory for output");
 		while (true) {
-			hibernate(false);// hiberante with setup incomplete
+			setupFailed("FAILED TO RESERVE MEM FOR OUT MESSAGE");
 		}
 	}
-	uint32_t now = millis();
+	now = millis();
 	while (!Serial.available() && millis() - now < 2000)
 	{
 	}
+#ifdef ADAFRUIT_FEATHER_M0
 	AdcCorrection::AdcCorrectionValues adcCorrectionValues;
+#endif
 	while (Serial.available())
 	{
 		char input;
@@ -241,6 +458,7 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 
 		if (input == 'A')
 		{
+#ifdef ADAFRUIT_FEATHER_M0
 			AdcCorrection adcCorrection;
 			if (!adcCorrection.begin(adcCorrectionValues._gainCorrection, adcCorrectionValues._offsetCorrection, adcCorrectionValues.valid))
 			{
@@ -252,53 +470,7 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 			{
 				adcCorrection.echoResults(adcCorrectionValues._gainCorrection, adcCorrectionValues._offsetCorrection);
 			}
-		}
-		else if (input == 'E')
-		{
-			Serial.print("\n\n##### EmotiBit Version "); Serial.print(EmotiBitVersionController::getHardwareVersion(_version)); Serial.println(" ####");
-			if (edaCorrection != nullptr)
-			{
-				delete edaCorrection;
-			}
-			edaCorrection = new EdaCorrection;
-			if (!edaCorrection->begin((uint8_t)_version))
-			{
-				// exit begin. delete pointer and free memory
-				delete edaCorrection;
-				edaCorrection = nullptr;
-			}
-			else
-			{
-				if (!edaCorrection->dummyWrite)
-				{
-					acquireData.tempHumidity = false;
-				}
-			}
-		}
-		else if (input == 'I')
-		{
-			testingMode = TestingMode::ISR_CORRECTION_UPDATE;
-			_edlPin = A0;
-			Serial.println("\n\nTestingMode changed to ISR_CORRECTION_UPDATE");
-			Serial.println("Reading EDL values from pin A0. Make sure ADC correction jig is in place.");
-			delay(3000);
-		}
-		else if (input == 'O')
-		{
-			AdcCorrection adcCorrection;
-			bool retVal = false;
-			retVal = adcCorrection.updateIsrOffsetCorr();
-			if (!retVal)
-			{
-				Serial.println("Exiting correction mode without updating. Adc correction not performed or data corrupted.");
-			}
-			else
-			{
-				Serial.println("Added ISR correction to the At-Winc flash.\n Verify EDL reading in the Oscilloscope.");
-				// If the emotibit is in ISR_CORRECTION_UPDATE, then we need to cahnge the mode to use the isrOffsetCOrrection
-				testingMode = TestingMode::ISR_CORRECTION_TEST;
-				_edlPin = A0;
-			}
+#endif
 		}
 		else
 		{
@@ -317,6 +489,7 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::PPG_RED] = &ppgRed;
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::PPG_GREEN] = &ppgGreen;
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = &temp0;
+	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::TEMPERATURE_1] = &temp1;
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE] = &therm0;
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = &humidity0;
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = &accelX;
@@ -335,40 +508,92 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::DEBUG] = &debugBuffer;
 
 	// Print board-specific settings
-	Serial.println("\nHW version-specific settings:");
-	Serial.print("buttonPin = "); Serial.println(buttonPin);
-	Serial.print("_batteryReadPin = "); Serial.println(_batteryReadPin);
-	Serial.print("_hibernatePin = "); Serial.println(_hibernatePin);
-	Serial.print("_edlPin = "); Serial.println(_edlPin);
-	Serial.print("_edrPin = "); Serial.println(_edrPin);
-	Serial.print("_vcc = "); Serial.println(_vcc);
-	Serial.print("adcRes = "); Serial.println(adcRes);
-	Serial.print("edaFeedbackAmpR = "); Serial.println(edaFeedbackAmpR);
-	Serial.print("edrAmplification = "); Serial.println(edrAmplification);
-	Serial.print("LED Driver Current Level = "); Serial.println(_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT]);
-
-	Serial.println("\nSensor setup:");
-	// setup LED DRIVER
-	Serial.println("Initializing NCP5623....");
-	led.begin(*_EmotiBit_i2c);
-	// check if the LED current level is valid.
-	if (_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT] > 0)
+	if (testingMode == TestingMode::ACUTE || testingMode == TestingMode::CHRONIC)
 	{
-		led.setCurrent(_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT]);
+		Serial.println("\nHW version-specific settings:");
+		Serial.print("buttonPin = "); Serial.println(buttonPin);
+		Serial.print("_batteryReadPin = "); Serial.println(_batteryReadPin);
+		Serial.print("Hibernate Pin = "); Serial.println(EmotiBitVersionController::HIBERNATE_PIN);
+		Serial.print("_vcc = "); Serial.println(_vcc);
+		Serial.print("adcRes = "); Serial.println(adcRes);
+		Serial.print("LED Driver Current Level = "); Serial.println(_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT]);
 	}
-	led.setLEDpwm((uint8_t)Led::RED, 8);
-	led.setLEDpwm((uint8_t)Led::BLUE, 8);
-	led.setLEDpwm((uint8_t)Led::YELLOW, 8);
-	led.setLED(uint8_t(EmotiBit::Led::RED), false);
-	led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
-	led.setLED(uint8_t(EmotiBit::Led::YELLOW), false);
-	chipBegun.NCP5623 = true;
+	
+	Serial.println("\nSensor setup:");
 
+	// setup sampling rates
+	EmotiBit::SamplingRates samplingRates;
+	samplingRates.accelerometer = (float) BASE_SAMPLING_FREQ / (float) IMU_SAMPLING_DIV;
+	samplingRates.gyroscope = (float) BASE_SAMPLING_FREQ / (float) IMU_SAMPLING_DIV;
+	samplingRates.magnetometer = (float) BASE_SAMPLING_FREQ / (float) IMU_SAMPLING_DIV;
+	samplingRates.eda = (float) BASE_SAMPLING_FREQ / (float) EDA_SAMPLING_DIV;
+	samplingRates.humidity = (float) BASE_SAMPLING_FREQ / (float) TEMPERATURE_0_SAMPLING_DIV / 2.f;
+	samplingRates.temperature = (float) BASE_SAMPLING_FREQ / (float) TEMPERATURE_0_SAMPLING_DIV / 2.f;
+	samplingRates.temperature_1 = (float)BASE_SAMPLING_FREQ / (float)TEMPERATURE_1_SAMPLING_DIV;
+	samplingRates.thermopile = (float)BASE_SAMPLING_FREQ / (float)THERMOPILE_SAMPLING_DIV;
+	setSamplingRates(samplingRates);
+	// ToDo: make target down-sampled rates more transparent
+	EmotiBit::SamplesAveraged samplesAveraged;
+	samplesAveraged.eda = samplingRates.eda / 15.f;
+	samplesAveraged.humidity = (float)samplingRates.humidity / 7.5f;
+	samplesAveraged.temperature = (float)samplingRates.temperature / 7.5f;
+	samplesAveraged.temperature_1 = 1;
+	if (thermopileMode == MODE_CONTINUOUS)
+	{
+		samplesAveraged.thermopile = 1;
+	}
+	else
+	{
+		samplesAveraged.thermopile = (float)samplingRates.thermopile / 7.5f;
+	}
+	samplesAveraged.battery = (float) BASE_SAMPLING_FREQ / (float) BATTERY_SAMPLING_DIV / (0.2f);
+	setSamplesAveraged(samplesAveraged);
+	Serial.println("\nSet Samples averaged:");
+	// setup LED DRIVER
+	Serial.print("Initializing NCP5623....");
+	// ToDo: add a success or fail return statement for LED driver
+	status = led.begin(*_EmotiBit_i2c);
+	if (status)
+	{
+		// check if the LED current level is valid.
+		if (_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT] > 0)
+		{
+			led.setCurrent(_emotiBitSystemConstants[(int)SystemConstants::LED_DRIVER_CURRENT]);
+		}
+		led.setLEDpwm((uint8_t)Led::RED, 8);
+		led.setLEDpwm((uint8_t)Led::BLUE, 8);
+		led.setLEDpwm((uint8_t)Led::YELLOW, 8);
+		led.setLED(uint8_t(EmotiBit::Led::RED), false);
+		led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
+		led.setLED(uint8_t(EmotiBit::Led::YELLOW), false);
+		led.send();
+		chipBegun.NCP5623 = true;
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::LED_CONTROLLER, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+		}
+		Serial.println("Completed");
+	}
+	else
+	{
+		Serial.println("Failed");
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::LED_CONTROLLER, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			Serial.println(factoryTestSerialOutput);
+			setupFailed("LED CONTROLLER");
+		}
+	}
+	
 	//// Setup PPG sensor
-	Serial.println("Initializing MAX30101....");
+	Serial.print("Initializing MAX30101....");
 	// Initialize sensor
 	while (ppgSensor.begin(*_EmotiBit_i2c) == false) // reads the part number to confirm device
 	{
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			// FAIL
+		}
 		Serial.println("MAX30101 was not found. Please check wiring/power. ");
 		_EmotiBit_i2c->flush();
 		_EmotiBit_i2c->endTransmission();
@@ -377,7 +602,9 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 		static uint32_t hibernateTimer = millis();
 		if (millis() - hibernateTimer > 2000)
 		{
-			hibernate(false);
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::PPG_SENSOR, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			Serial.println(factoryTestSerialOutput);
+			setupFailed("PPG");
 		}
 	}
 	ppgSensor.wakeUp();
@@ -391,17 +618,31 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 		ppgSettings.pulseWidth,
 		ppgSettings.adcRange
 	);
+	ppgSensor.enableDIETEMPRDY(); //Enable the temp ready interrupt. This is required to read die temperatures. Refer datasheet.
 	ppgSensor.check();
 	chipBegun.MAX30101 = true;
+	if (testingMode == TestingMode::FACTORY_TEST)
+	{
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::PPG_SENSOR, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+	}
+	Serial.println("Completed");
 
 	// Setup IMU
-	Serial.println("Initializing IMU device....");
+	Serial.print("Initializing BMI160+BMM150.... ");
 	status = BMI160.begin(BMI160GenClass::I2C_MODE, *_EmotiBit_i2c);
 	if (status)
 	{
 		uint8_t dev_id = BMI160.getDeviceID();
 		Serial.print("DEVICE ID: ");
-		Serial.println(dev_id, HEX);
+		Serial.print(dev_id, HEX);
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			// Add PASS
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::ACCEL_GYRO, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			// ToDo: add the device ID
+			String id = String(dev_id, HEX);
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::IMU_ID, id.c_str());
+		}
 
 		// Accelerometer
 		_accelerometerRange = 8;
@@ -501,97 +742,131 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	}
 	else
 	{
-		hibernate(false);
+		if (testingMode == TestingMode::FACTORY_TEST)
+		{
+			// Add FAIL
+			EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::ACCEL_GYRO, EmotiBitFactoryTest::TypeTag::TEST_FAIL);		
+			Serial.println(factoryTestSerialOutput);
+		}
+		setupFailed("IMU");
 	}
-
+	if ((int)_hwVersion == (int)EmotiBitVersionController::EmotiBitVersion::V03B)
+	{
+		_enableDigitalFilter.mx = true;
+		_enableDigitalFilter.my = true;
+		_enableDigitalFilter.mz = true;
+		Serial.println("Enabling digital filtering for magnetometer");
+	}
+	
+	Serial.println(" ... Completed");
 	// ToDo: Add interrupts to accurately record timing of data capture
 
 	//BMI160.detachInterrupt();
 	//BMI160.setRegister()
 
-
-	// Setup Temperature / Humidity Sensor
-	Serial.println("\n\nConfiguring Temperature / Humidity Sensor");
-	// moved the macro definition from EdaCorrection to EmotiBitVersionController
+	if ((int)_hwVersion <= (int)EmotiBitVersionController::EmotiBitVersion::V03B)
+	{
+		// Setup Temperature / Humidity Sensor
+		Serial.print("Initializing SI-7013");
+		// moved the macro definition from EdaCorrection to EmotiBitVersionController
 #ifdef USE_ALT_SI7013 
-	status = tempHumiditySensor.setup(*_EmotiBit_i2c, 0x41);
+		status = tempHumiditySensor.setup(*_EmotiBit_i2c, 0x41);
 #else
-	status = tempHumiditySensor.setup(*_EmotiBit_i2c);
+		status = tempHumiditySensor.setup(*_EmotiBit_i2c);
 #endif
-	if (status)
-	{
-		// Si-7013 detected on the EmotiBit
-		tempHumiditySensor.changeSetting(Si7013::Settings::RESOLUTION_H11_T11);
-		tempHumiditySensor.changeSetting(Si7013::Settings::ADC_NORMAL);
-		tempHumiditySensor.changeSetting(Si7013::Settings::VIN_UNBUFFERED);
-		tempHumiditySensor.changeSetting(Si7013::Settings::VREFP_VDDA);
-		tempHumiditySensor.changeSetting(Si7013::Settings::ADC_NO_HOLD);
-
-		tempHumiditySensor.readSerialNumber();
-		Serial.print("Si7013 Electronic Serial Number: ");
-		Serial.print(tempHumiditySensor.sernum_a);
-		Serial.print(", ");
-		Serial.print(tempHumiditySensor.sernum_b);
-		Serial.print("\n");
-		Serial.print("Model: ");
-		Serial.println(tempHumiditySensor._model);
-		chipBegun.SI7013 = true;
-
-		tempHumiditySensor.startHumidityTempMeasurement();
-	}
-	else
-	{
-		hibernate(false);
-	}
-
-
-	// Thermopile
-	Serial.println("Configuring MLX90632");
-	MLX90632::status returnError; // Required as a parameter for begin() function in the MLX library 
-	status = thermopile.begin(deviceAddress.MLX, *_EmotiBit_i2c, returnError);
-	if (status)
-	{
-		thermopile.setMeasurementRate(thermopileFs);
-		thermopile.setMode(thermopileMode);
-		uint8_t thermMode = thermopile.getMode();
-		if (thermMode == MODE_CONTINUOUS)
+		if (status)
 		{
-			Serial.println("MODE_CONTINUOUS");
-		}
-		if (thermMode == MODE_STEP)
-		{
-			Serial.println("MODE_STEP");
-		}
-		if (thermMode == MODE_SLEEP)
-		{
-			Serial.println("MODE_SLEEP");
-		}
-		chipBegun.MLX90632 = true;
-	}
-	else
-	{
-		hibernate(false);
-	}
+			if (testingMode == TestingMode::FACTORY_TEST)
+			{
+				// Add PASS
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::TEMP_SENSOR, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			}
+			// Si-7013 detected on the EmotiBit
+			tempHumiditySensor.changeSetting(Si7013::Settings::RESOLUTION_H11_T11);
+			tempHumiditySensor.changeSetting(Si7013::Settings::ADC_NORMAL);
+			tempHumiditySensor.changeSetting(Si7013::Settings::VIN_UNBUFFERED);
+			tempHumiditySensor.changeSetting(Si7013::Settings::VREFP_VDDA);
+			tempHumiditySensor.changeSetting(Si7013::Settings::ADC_NO_HOLD);
 
-	// Setup EDA
-	Serial.println("\nConfiguring GSR...");
-	pinMode(_edlPin, INPUT);
-	pinMode(_edrPin, INPUT);
-	//samdStorageAdcValues = samdFlashStorage.read(); // reading from samd flash storage into local struct
+			tempHumiditySensor.readSerialNumber();
+			Serial.print("\tSi7013 Electronic Serial Number: ");
+			Serial.print(tempHumiditySensor.sernum_a);
+			Serial.print(", ");
+			Serial.print(tempHumiditySensor.sernum_b);
+			// update the device ID for V3 and lower
+			emotibitDeviceId = String(tempHumiditySensor.sernum_a) + "-" + String(tempHumiditySensor.sernum_b);
+			//Serial.print("\n");
+			Serial.print("\tModel: ");
+			Serial.print(tempHumiditySensor._model);
+			chipBegun.SI7013 = true;
+			tempHumiditySensor.startHumidityTempMeasurement();
+		}
+		else
+		{
+			if (testingMode == TestingMode::FACTORY_TEST)
+			{
+				// Add fail
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::TEMP_SENSOR, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+				Serial.println(factoryTestSerialOutput);
+			}
+			setupFailed("TEMP/HUMIDITY");
+		}
+		Serial.println(" ... Completed");
+	}
+	
+	if (emotiBitSku.equals(EmotiBitVariants::EMOTIBIT_SKU_MD))
+	{
+		// Thermopile
+		Serial.print("Initializing MLX90632... ");
+		MLX90632::status returnError; // Required as a parameter for begin() function in the MLX library 
+		status = thermopile.begin(deviceAddress.MLX, *_EmotiBit_i2c, returnError);
+		if (status)
+		{
+			if (testingMode == TestingMode::FACTORY_TEST)
+			{
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::THERMOPILE, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+			}
+			Serial.println("Success");
+			thermopile.setMeasurementRate(thermopileFs);
+			thermopile.setMode(thermopileMode);
+			uint8_t thermMode = thermopile.getMode();
+			if (thermMode == MODE_CONTINUOUS)
+			{
+				Serial.print("MODE_CONTINUOUS");
+			}
+			if (thermMode == MODE_STEP)
+			{
+				Serial.print("MODE_STEP");
+			}
+			if (thermMode == MODE_SLEEP)
+			{
+				Serial.print("MODE_SLEEP");
+			}
+			chipBegun.MLX90632 = true;
+		}
+		else
+		{
+			if (testingMode == TestingMode::FACTORY_TEST)
+			{
+				EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::THERMOPILE, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+			}
+			Serial.println("Failed");
+			setupFailed("THERMOPILE");
+		}
+	}
+#ifdef ADAFRUIT_FEATHER_M0
+	// ADC Correction
+	Serial.println("Checking for ADC Correction...");
 	analogReadResolution(_adcBits);
-	Serial.println("Configuring ADC Corrections...");
-	// If the correction data does not exist on the SAMD flash
 	if (!adcCorrectionValues.valid)
 	{
 		// Instantiate the ADC Correction class to read data from the AT-Winc flash to calculate the correction values
 		AdcCorrection adcCorrection(AdcCorrection::AdcCorrectionRigVersion::UNKNOWN, adcCorrectionValues._gainCorrection, adcCorrectionValues._offsetCorrection, adcCorrectionValues.valid, adcCorrectionValues._isrOffsetCorr);
 		if (adcCorrection.atwincAdcDataCorruptionTest != AdcCorrection::Status::FAILURE && adcCorrection.atwincAdcMetaDataCorruptionTest != AdcCorrection::Status::FAILURE)
 		{
-			//samdFlashStorage.write(samdStorageAdcValues);// Writing it to the SAMD flash storage
-			_isrOffsetCorr = adcCorrectionValues._isrOffsetCorr;
-			Serial.print("Gain Correction:"); Serial.print(adcCorrectionValues._gainCorrection); Serial.print("\toffset correction:"); Serial.println(adcCorrectionValues._offsetCorrection);
-			Serial.print("isr offset Corr: "); Serial.println(_isrOffsetCorr,6);
-			Serial.println("Enabling the ADC with the correction values");
+			emotibitEda.setAdcIsrOffsetCorr(adcCorrectionValues._isrOffsetCorr);
+			Serial.print("Gain Correction:"); Serial.print(adcCorrectionValues._gainCorrection); Serial.print("\toffset correction:"); Serial.print(adcCorrectionValues._offsetCorrection);
+			Serial.print("\tisr offset Corr: "); Serial.println(adcCorrectionValues._isrOffsetCorr, 2);
 			analogReadCorrection(adcCorrectionValues._offsetCorrection, adcCorrectionValues._gainCorrection);
 		}
 	}
@@ -599,59 +874,40 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	else
 	{
 		Serial.println("ADC correction already enabled in correction test mode");
-		Serial.print("Gain Correction:"); Serial.print(adcCorrectionValues._gainCorrection); 
+		Serial.print("Gain Correction:"); Serial.print(adcCorrectionValues._gainCorrection);
 		Serial.print("\toffset correction:"); Serial.println(adcCorrectionValues._offsetCorrection);
 	}
-	
-	Serial.println("Configuring EDA Calibrations...");
-	
-	// If Eda Correction mode was not initialized
-	if (edaCorrection == nullptr)
+#endif
+
+	// Setup EDA
+	Serial.println("\nInitializing EDA... ");
+	if (emotibitEda.setup(_hwVersion, _samplingRates.eda / ((float)_samplesAveraged.eda), &eda, &edl, &edr, _EmotiBit_i2c, &edlBuffer, &edrBuffer))
 	{
-		edaCorrection = new EdaCorrection;
-		edaCorrection->getEdaCalibrationValues(&tempHumiditySensor, vRef1, vRef2, edaFeedbackAmpR);
-		// delete after the OTP has been read for calibration
-		delete edaCorrection;
-		edaCorrection = nullptr;
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::ADC_INIT, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+		Serial.println("Completed");
 	}
 	else
 	{
-		Serial.println("In EDA Calibration mode");
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::ADC_INIT, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+		Serial.println(factoryTestSerialOutput);
+		Serial.println("failed");
 	}
-
-	led.setLED(uint8_t(EmotiBit::Led::YELLOW), true);
-
-
-	// setup sampling rates
-	Serial.println("Setting up sampling rates...");
-	EmotiBit::SamplingRates samplingRates;
-	samplingRates.accelerometer = BASE_SAMPLING_FREQ / IMU_SAMPLING_DIV;
-	samplingRates.gyroscope = BASE_SAMPLING_FREQ / IMU_SAMPLING_DIV;
-	samplingRates.magnetometer = BASE_SAMPLING_FREQ / IMU_SAMPLING_DIV;
-	samplingRates.eda = BASE_SAMPLING_FREQ / EDA_SAMPLING_DIV;
-	samplingRates.humidity = BASE_SAMPLING_FREQ / TEMPERATURE_SAMPLING_DIV / 2;
-	samplingRates.temperature = BASE_SAMPLING_FREQ / TEMPERATURE_SAMPLING_DIV / 2;
-	samplingRates.thermopile = (float)BASE_SAMPLING_FREQ / (float)THERMOPILE_SAMPLING_DIV;
-	setSamplingRates(samplingRates);
-
-	// ToDo: make target down-sampled rates more transparent
-	EmotiBit::SamplesAveraged samplesAveraged;
-	samplesAveraged.eda = samplingRates.eda / 15;
-	samplesAveraged.humidity = (float)samplingRates.humidity / 7.5f;
-	samplesAveraged.temperature = (float)samplingRates.temperature / 7.5f;
-	if (thermopileMode == MODE_CONTINUOUS)
+	Serial.println("\nLoading EDA calibration... ");
+	if (emotibitEda.stageCalibLoad(&_emotibitNvmController, true))
 	{
-		samplesAveraged.thermopile = 1;
+		Serial.println("Completed");
 	}
 	else
 	{
-		samplesAveraged.thermopile = (float)samplingRates.thermopile / 7.5f;
+		Serial.println("failed");
 	}
-	samplesAveraged.battery = BASE_SAMPLING_FREQ / BATTERY_SAMPLING_DIV / 1;
-	setSamplesAveraged(samplesAveraged);
+
+
+	// Sensor setup complete
+	Serial.println("Sensor setup complete");
 
 	// EDL Filter Parameters
-	edaCrossoverFilterFreq = emotiBitVersionController.getMathConstant(MathConstants::EDA_CROSSOVER_FILTER_FREQ);
+	//edaCrossoverFilterFreq = emotiBitVersionController.getMathConstant(MathConstants::EDA_CROSSOVER_FILTER_FREQ);
 	/*
 	if (edaCrossoverFilterFreq > 0)// valid assignment of constant
 	{
@@ -664,16 +920,63 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 		_edlDigFiltAlpha = pow(M_E, -2.f * PI * edaCrossoverFilterFreq / (_samplingRates.eda / _samplesAveraged.eda));
 	}
 	*/
-	setupSdCard();
 	led.setLED(uint8_t(EmotiBit::Led::RED), true);
+	led.send();
+	status = setupSdCard();
+	if (status)
+	{
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SD_CARD, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+		// Give a brief delay to signify to the user "config file is being loaded"
+		delay(2000);
+		led.setLED(uint8_t(EmotiBit::Led::RED), false);
+		led.send();
+	}
+	// ToDo: verify if this else is ever reached.
+	else
+	{
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SD_CARD, EmotiBitFactoryTest::TypeTag::TEST_FAIL);
+		Serial.println(factoryTestSerialOutput);
+		sleep(true);
+	}
 	//WiFi Setup;
-	Serial.println("\nSetting up WiFi");
+	Serial.print("\nSetting up WiFi\n");
 #if defined(ADAFRUIT_FEATHER_M0)
 	WiFi.setPins(8, 7, 4, 2);
-#endif
 	WiFi.lowPowerMode();
-	_emotiBitWiFi.begin();
+#endif
+	printEmotiBitInfo();
+	// turn BLUE on to signify we are trying to connect to WiFi
 	led.setLED(uint8_t(EmotiBit::Led::BLUE), true);
+	led.send();
+	uint16_t attemptDelay = 20000;  // in mS. ESP32 has been observed to take >10 seconds to resolve an enterprise connection
+	uint8_t maxAttemptsPerCred = 1;
+	uint32_t timeout = attemptDelay * maxAttemptsPerCred * _emotiBitWiFi.getNumCredentials() * 2; // Try cycling through all credentials at least 2x before giving up and trying a restart
+	if (_emotiBitWiFi.isEnterpriseNetworkListed())
+	{
+		// enterprise network is listed in network credential list.
+		// restart MCU after timeout
+		_emotiBitWiFi.begin(timeout, maxAttemptsPerCred, attemptDelay);
+	}
+	else
+	{
+		// only personal networks listed in credentials list.
+		// keep trying to connect to networks without any timeout
+		_emotiBitWiFi.begin(-1, maxAttemptsPerCred, attemptDelay);
+	}
+	if (_emotiBitWiFi.status(false) != WL_CONNECTED)
+	{ 
+		// Could not connect to network. software restart and begin setup again.
+		restartMcu();
+	}
+	led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
+	led.send();
+	if (testingMode == TestingMode::FACTORY_TEST)
+	{
+		// Add Pass or fail
+		// ToDo: add mechanism to detect fail/pass
+		EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::WIFI, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+	}
+	Serial.println(" WiFi setup Completed");
 
 	setPowerMode(PowerMode::NORMAL_POWER);
 	typeTags[(uint8_t)EmotiBit::DataType::EDA] = EmotiBitPacket::TypeTag::EDA;
@@ -683,6 +986,7 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	typeTags[(uint8_t)EmotiBit::DataType::PPG_RED] = EmotiBitPacket::TypeTag::PPG_RED;
 	typeTags[(uint8_t)EmotiBit::DataType::PPG_GREEN] = EmotiBitPacket::TypeTag::PPG_GREEN;
 	typeTags[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = EmotiBitPacket::TypeTag::TEMPERATURE_0;
+	typeTags[(uint8_t)EmotiBit::DataType::TEMPERATURE_1] = EmotiBitPacket::TypeTag::TEMPERATURE_1;
 	typeTags[(uint8_t)EmotiBit::DataType::THERMOPILE] = EmotiBitPacket::TypeTag::THERMOPILE;
 	typeTags[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = EmotiBitPacket::TypeTag::HUMIDITY_0;
 	typeTags[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = EmotiBitPacket::TypeTag::ACCELEROMETER_X;
@@ -700,51 +1004,59 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	typeTags[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW] = EmotiBitPacket::TypeTag::DATA_OVERFLOW;
 	typeTags[(uint8_t)EmotiBit::DataType::DEBUG] = EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG;
 
-	printLen[(uint8_t)EmotiBit::DataType::EDA] = 6;
-	printLen[(uint8_t)EmotiBit::DataType::EDL] = 6;
-	printLen[(uint8_t)EmotiBit::DataType::EDR] = 6;
-	printLen[(uint8_t)EmotiBit::DataType::PPG_INFRARED] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::PPG_RED] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::PPG_GREEN] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::THERMOPILE] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Y] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Z] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::GYROSCOPE_X] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::GYROSCOPE_Y] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::GYROSCOPE_Z] = 3;
-	printLen[(uint8_t)EmotiBit::DataType::MAGNETOMETER_X] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Y] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Z] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::BATTERY_VOLTAGE] = 2;
-	printLen[(uint8_t)EmotiBit::DataType::BATTERY_PERCENT] = 0;
-	printLen[(uint8_t)EmotiBit::DataType::DEBUG] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::EDA] = 6;
+	_printLen[(uint8_t)EmotiBit::DataType::EDL] = 6;
+	_printLen[(uint8_t)EmotiBit::DataType::EDR] = 6;
+	_printLen[(uint8_t)EmotiBit::DataType::PPG_INFRARED] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::PPG_RED] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::PPG_GREEN] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::TEMPERATURE_1] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::THERMOPILE] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Y] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Z] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::GYROSCOPE_X] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::GYROSCOPE_Y] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::GYROSCOPE_Z] = 3;
+	_printLen[(uint8_t)EmotiBit::DataType::MAGNETOMETER_X] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Y] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Z] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::BATTERY_VOLTAGE] = 2;
+	_printLen[(uint8_t)EmotiBit::DataType::BATTERY_PERCENT] = 0;
+	_printLen[(uint8_t)EmotiBit::DataType::DEBUG] = 0;
 
-	sendData[(uint8_t)EmotiBit::DataType::EDA] = true;
-	sendData[(uint8_t)EmotiBit::DataType::EDL] = true;
-	sendData[(uint8_t)EmotiBit::DataType::EDR] = true;
-	sendData[(uint8_t)EmotiBit::DataType::PPG_INFRARED] = true;
-	sendData[(uint8_t)EmotiBit::DataType::PPG_RED] = true;
-	sendData[(uint8_t)EmotiBit::DataType::PPG_GREEN] = true;
-	sendData[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = true;
-	sendData[(uint8_t)EmotiBit::DataType::THERMOPILE] = true;
-	sendData[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = true;
-	sendData[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = true;
-	sendData[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Y] = true;
-	sendData[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Z] = true;
-	sendData[(uint8_t)EmotiBit::DataType::GYROSCOPE_X] = true;
-	sendData[(uint8_t)EmotiBit::DataType::GYROSCOPE_Y] = true;
-	sendData[(uint8_t)EmotiBit::DataType::GYROSCOPE_Z] = true;
-	sendData[(uint8_t)EmotiBit::DataType::MAGNETOMETER_X] = true;
-	sendData[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Y] = true;
-	sendData[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Z] = true;
-	sendData[(uint8_t)EmotiBit::DataType::BATTERY_VOLTAGE] = true;
-	sendData[(uint8_t)EmotiBit::DataType::BATTERY_PERCENT] = true;
-	sendData[(uint8_t)EmotiBit::DataType::DATA_CLIPPING] = true;
-	sendData[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW] = true;
-	sendData[(uint8_t)EmotiBit::DataType::DEBUG] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::EDA] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::EDL] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::EDR] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::PPG_INFRARED] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::PPG_RED] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::PPG_GREEN] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::TEMPERATURE_1] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::THERMOPILE] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Y] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::ACCELEROMETER_Z] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::GYROSCOPE_X] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::GYROSCOPE_Y] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::GYROSCOPE_Z] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::MAGNETOMETER_X] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Y] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Z] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::BATTERY_VOLTAGE] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::BATTERY_PERCENT] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::DATA_CLIPPING] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW] = true;
+	_sendData[(uint8_t)EmotiBit::DataType::DEBUG] = true;
+
+	// Turn off serial data sending
+	for (uint8_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+	{
+		_sendSerialData[i] = false;
+	}
 
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::EDA] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::EDL] = false;
@@ -753,6 +1065,7 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::PPG_RED] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::PPG_GREEN] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::TEMPERATURE_0] = false;
+	_newDataAvailable[(uint8_t)EmotiBit::DataType::TEMPERATURE_1] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::THERMOPILE] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::HUMIDITY_0] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::ACCELEROMETER_X] = false;
@@ -770,52 +1083,66 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW] = false;
 	_newDataAvailable[(uint8_t)EmotiBit::DataType::DEBUG] = false;
 
-	Serial.println("\nEmotiBit Setup complete");
-
-	Serial.print("\nEmotiBit version: ");
-	Serial.println(EmotiBitVersionController::getHardwareVersion(_version));
-	Serial.print("Firmware version: ");
-	Serial.println(firmware_version);
+	Serial.println("EmotiBit Setup complete");
+	_EmotiBit_i2c->setClock(i2cClkMain);// Set clock to 400KHz except when accessing Si7013
+	EmotiBitFactoryTest::updateOutputString(factoryTestSerialOutput, EmotiBitFactoryTest::TypeTag::SETUP_COMPLETE, EmotiBitFactoryTest::TypeTag::TEST_PASS);
+#ifdef ADAFRUIT_FEATHER_M0
 	Serial.println("Free Ram :" + String(freeMemory(), DEC) + " bytes");
-	Serial.println("Electronic Serial Number:");
-	Serial.print("Si7013_SNA),");
-	Serial.print(tempHumiditySensor.sernum_a);
-	Serial.print(", (Si7013_SNB), ");
-	Serial.print(tempHumiditySensor.sernum_b);
+#endif
 	Serial.print("\n");
-	//Serial.println("### GSR Calibration ##");
-	//Serial.println("### ADC correction ###");
-	//if (adcCorrectionValues.valid)
-	//{
-	//	Serial.print("Gain Correction:"); Serial.print(adcCorrectionValues._gainCorrection); Serial.print("\tOffset Correction: "); Serial.println(adcCorrectionValues._offsetCorrection);
-	//}
-	//else
-	//{
-	//	Serial.println("Using ADC without correction");
-	//}
 	uint8_t ledOffdelay = 100;	// Aesthetic delay
-	led.setLED(uint8_t(EmotiBit::Led::RED), false);
-	delay(ledOffdelay);
-	led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
-	delay(ledOffdelay);
-	led.setLED(uint8_t(EmotiBit::Led::YELLOW), false);
-
 	if (!_sendTestData)
 	{
+#ifdef ADAFRUIT_FEATHER_M0
 		attachToInterruptTC3(&ReadSensors, this);
-		Serial.println("Starting interrupts");
+		//Serial.println("Starting interrupts");
 		startTimer(BASE_SAMPLING_FREQ);
+#elif defined ARDUINO_FEATHER_ESP32
+		// setup timer
+		timer = timerBegin(0, 80, true); // timer ticks with APB timer, which runs at 80MHz. This setting makes the timer tick every 1uS
+
+		// Attach onTimer function to our timer.
+		timerAttachInterrupt(timer, &onTimer, true);
+
+		// Set alarm to call onTimer function (value in microseconds).
+		// Repeat the alarm (third parameter)
+		timerAlarmWrite(timer, 1000000 / BASE_SAMPLING_FREQ, true);
+
+		// Start an alarm
+		timerAlarmEnable(timer);
+
+		attachToCore(&ReadSensors, this);
+#endif
 	}
 
+	Serial.println("");
+#if defined(ARDUINO_FEATHER_ESP32)
+	Serial.println("HUZZAH32 Feather detected.");
+#endif
+#if defined(ADAFRUIT_FEATHER_M0)
+	Serial.println("Feather M0 detected.");
+#endif
+#if defined(EMOTIBIT_PPG_100HZ)
+	Serial.println("100Hz PPG activated. Ensure correct settings in ofxOscilloscopeSettings.xml are used to correctly visualize live data.");
+#endif
+	Serial.println("");
+
+	Serial.println("Switch to EmotiBit Oscilloscope to stream Data");
+	
+	if (testingMode == TestingMode::FACTORY_TEST)
+	{
+		// Send complete Sensor init string
+		Serial.println(factoryTestSerialOutput);
+	}
 	// Debugging scope pins
 	if (DIGITAL_WRITE_DEBUG)
 	{
-		pinMode(14, OUTPUT);
-		digitalWrite(14, LOW);
-		pinMode(16, OUTPUT);
-		digitalWrite(16, LOW);
-		pinMode(10, OUTPUT);
-		digitalWrite(10, LOW);
+		pinMode(DEBUG_OUT_PIN_0, OUTPUT);
+		digitalWrite(DEBUG_OUT_PIN_0, LOW);
+		pinMode(DEBUG_OUT_PIN_1, OUTPUT);
+		digitalWrite(DEBUG_OUT_PIN_1, LOW);
+		pinMode(DEBUG_OUT_PIN_2, OUTPUT);
+		digitalWrite(DEBUG_OUT_PIN_2, LOW);
 	}
 
 	if (testingMode == TestingMode::ACUTE)
@@ -826,7 +1153,9 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 	{
 		Serial.println("TestingMode::CHRONIC");
 	}
-
+#ifdef ARDUINO_FEATHER_ESP32
+	Serial.print("The main loop is executing on core: "); Serial.println(xPortGetCoreID());
+#endif
 	if (_debugMode) 
 	{
 		Serial.println("**********************************************************");
@@ -834,10 +1163,48 @@ uint8_t EmotiBit::setup(size_t bufferCapacity)
 		Serial.println("Enter ? to know more about available options in DEBUG MODE");
 		Serial.println("**********************************************************");
 	}
+	// ToDo: implement logic to determine return val
+	return 0;
 } // Setup
 
+
+void EmotiBit::setupFailed(const String failureMode, int buttonPin)
+{
+	if (buttonPin > -1)
+	{
+		pinMode(buttonPin, INPUT);
+	}
+	bool buttonState = false;
+	uint32_t timeSinceLastPrint = millis();
+	while (1)
+	{
+		// NOTE: The button press check doesn't work on EmotiBit v02 because DVDD is not enabled
+		if (buttonPin > -1 && digitalRead(buttonPin))
+		{
+			
+			if (buttonState == false)
+			{
+				Serial.println("**** Button Press Detected (DVDD is Working) ****");
+				// return;
+			}
+			buttonState = true;
+		}
+		else
+		{
+			buttonState = false;
+		}
+
+		// not using delay to keep the CPU acitve from serial pings from host computer
+		if (millis() - timeSinceLastPrint > 1000)
+		{
+			Serial.println("Setup failed: " + failureMode);
+			timeSinceLastPrint = millis();
+		}
+	}
+}
 bool EmotiBit::setupSdCard()
 {
+
 	Serial.print("\nInitializing SD card...");
 	// see if the card is present and can be initialized:
 	bool success = false;
@@ -846,7 +1213,11 @@ bool EmotiBit::setupSdCard()
 		Serial.print(i);
 		Serial.print(",");
 		// begin function initializes SPI at MAX speed by deafult. check /src/SpiDriver/SdSpiDriver.h for details on the constructor
-		if (SD.begin(_sdCardChipSelectPin))
+#if defined ARDUINO_FEATHER_ESP32
+		if (SD.begin(EmotiBitVersionController::SD_CARD_CHIP_SEL_PIN, SPI, 10000000)) // 10MHz works with 40MHz CPU, 20Mhz does NOT
+#else
+		if (SD.begin(EmotiBitVersionController::SD_CARD_CHIP_SEL_PIN))
+#endif
 		{
 			success = true;
 			break;
@@ -855,78 +1226,230 @@ bool EmotiBit::setupSdCard()
 	}
 	if (!success) {
 		Serial.print("...Card failed, or not present on chip select ");
-		Serial.println(_sdCardChipSelectPin);
+		Serial.println(EmotiBitVersionController::SD_CARD_CHIP_SEL_PIN);
 		// don't do anything more:
 		// ToDo: Handle case where we still want to send network data
 		//while (true) {
-		//	hibernate();
+		//	sleep();
 		return false;
 	}
 	Serial.println("card initialized.");
-	SD.ls(LS_R);
+	if (testingMode == TestingMode::ACUTE || testingMode == TestingMode::CHRONIC)
+	{
+		// list all files on SD-Card
+#if defined ARDUINO_FEATHER_ESP32
+		Serial.println("ESP::: Reading SD-Card");
+		File dir;
+		dir = SD.open("/");
+		// taken from SD examples: listFiles
+		while (true)
+		{
+			File entry = dir.openNextFile();
+			if (!entry) {
+				// no more files
+				break;
+			}
+			if (!entry.isDirectory()) {
+				Serial.println(entry.name());
+			}
+			entry.close();
+		}
+#else 
+		SD.ls(LS_R);
+#endif
 
+	}
 	Serial.print(F("\nLoading configuration file: "));
 	Serial.println(_configFilename);
 	if (!loadConfigFile(_configFilename)) {
 		Serial.println("SD card configuration file parsing failed.");
 		Serial.println("Create a file 'config.txt' with the following JSON:");
 		Serial.println("{\"WifiCredentials\": [{\"ssid\":\"SSSS\",\"password\" : \"PPPP\"}]}");
-		while (true) {
-			hibernate();
-		}
+		// ToDo: verify if we need a separate case for FACTORY_TEST. We should always have a config file, since FACTORY TEST is a controlled environment
+		setupFailed("Config file not found");
 	}
 
 	return true;
 
 }
 
-bool EmotiBit::addPacket(uint32_t timestamp, EmotiBit::DataType t, float * data, size_t dataLen, uint8_t precision) {
+bool EmotiBit::addPacket(uint32_t timestamp, const String typeTag, float * data, size_t dataLen, uint8_t precision, bool printToSerial)
+{
 	static EmotiBitPacket::Header header;
-	if (dataLen > 0) {
-		// ToDo: Consider faster ways to populate the _outDataPackets
-
-		//if (t == EmotiBit::DataType::DATA_OVERFLOW){
-		//	addDebugPacket((uint8_t)EmotiBit::DebugTags::WIFI_CONNHISTORY, timestamp);  // addDebugPacket(case, timestamp) 
-		//}
-
-		header = EmotiBitPacket::createHeader(typeTags[(uint8_t)t], timestamp, _outDataPacketCounter++, dataLen);
-		_outDataPackets += EmotiBitPacket::headerToString(header);
-		for (uint16_t i = 0; i < dataLen; i++) {
-			_outDataPackets += ",";
-			if (t == EmotiBit::DataType::DATA_CLIPPING || t == EmotiBit::DataType::DATA_OVERFLOW) {
-				// If it's a clipping/overflow type, write the data as a string rather than float
-				// ToDo: consider how to better keep track of clipping and overflows
-				_outDataPackets += typeTags[(uint8_t)data[i]];
+	if (dataLen > 0) 
+	{
+		uint8_t protocolVersion = 1;
+		if (DC_DO_V2)
+		{
+			if (typeTag.equals(typeTags[(uint8_t)EmotiBit::DataType::DATA_CLIPPING]) || typeTag.equals(typeTags[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]))
+			{
+				protocolVersion = 2;
 			}
-			else {
-				_outDataPackets += String(data[i], precision);
+		}
+		// Add packet header to _outDataPackets
+		
+		// create packet header and add to outputDataPackets
+		header = EmotiBitPacket::createHeader(typeTag, timestamp, _outDataPacketCounter++, dataLen, protocolVersion);
+		String headerString = EmotiBitPacket::headerToString(header);
+		_outDataPackets += headerString;
+		if (printToSerial)
+		{
+			Serial.print(headerString);
+		}
+
+		if (typeTag.equals(typeTags[(uint8_t)EmotiBit::DataType::DATA_CLIPPING]) || typeTag.equals(typeTags[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]))
+		{
+			// Handle clippping and overflow as a special case
+			for (uint8_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+			{
+				// Add all the clipping/overflow events across all the buffers to the packet
+				if (i != (uint8_t)EmotiBit::DataType::DATA_CLIPPING && i != (uint8_t)EmotiBit::DataType::DATA_OVERFLOW) {
+					// Skip clipping & overflow types
+					size_t count = 0;
+					if (typeTag.equals(typeTags[(uint8_t)EmotiBit::DataType::DATA_CLIPPING]))
+					{
+						count = dataDoubleBuffers[i]->getClippedCount(DoubleBufferFloat::BufferSelector::OUT);
+					}
+					if (typeTag.equals(typeTags[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]))
+					{
+						count = dataDoubleBuffers[i]->getOverflowCount(DoubleBufferFloat::BufferSelector::OUT);
+					}
+					if (DC_DO_V2)
+					{
+						if (count > 0)
+						{
+							String temp = EmotiBitPacket::PAYLOAD_DELIMITER + String(typeTags[i]) + EmotiBitPacket::PAYLOAD_DELIMITER + String(count);
+							if (_outDataPackets.length() + temp.length() < OUT_MESSAGE_RESERVE_SIZE - 1)
+							{
+								_outDataPackets += temp;
+								if (printToSerial)
+								{
+									Serial.print(temp);
+								}
+							}
+							else
+							{
+								_outDataPackets += EmotiBitPacket::PAYLOAD_TRUNCATED;
+								Serial.print("ERROR: _outDataPackets exceeded OUT_MESSAGE_RESERVE_SIZE ");
+								Serial.println("[" + String(_outDataPackets.length()) + "+" + String(temp.length()) + "/" + String(OUT_MESSAGE_RESERVE_SIZE) + "]");
+							}
+						}
+					}
+					else
+					{
+						for (size_t n = 0; n < count; n++)
+						{
+							String temp = EmotiBitPacket::PAYLOAD_DELIMITER + String(typeTags[i]);
+							if (_outDataPackets.length() + temp.length() < OUT_MESSAGE_RESERVE_SIZE - 1)
+							{
+								_outDataPackets += temp;
+								if (printToSerial)
+								{
+									Serial.print(temp);
+								}
+							}
+							else
+							{
+								_outDataPackets += EmotiBitPacket::PAYLOAD_TRUNCATED;
+								Serial.print("ERROR: _outDataPackets exceeded OUT_MESSAGE_RESERVE_SIZE ");
+								Serial.println("[" + String(_outDataPackets.length()) + "+" + String(temp.length()) + "/" + String(OUT_MESSAGE_RESERVE_SIZE) + "]");
+							}
+						}
+					}
+				}
+			}
+		}
+		else
+		{
+			for (uint16_t d = 0; d < dataLen; d++)
+			{
+				String temp = EmotiBitPacket::PAYLOAD_DELIMITER + String(data[d], int(precision));
+				if (_outDataPackets.length() + temp.length() < OUT_MESSAGE_RESERVE_SIZE - 1)
+				{
+					_outDataPackets += temp;
+					if (printToSerial)
+					{
+						Serial.print(temp);
+					}
+				}
+				else
+				{
+					_outDataPackets += EmotiBitPacket::PAYLOAD_TRUNCATED;
+					Serial.print("ERROR: _outDataPackets exceeded OUT_MESSAGE_RESERVE_SIZE ");
+					Serial.println("[" + String(_outDataPackets.length()) + "+" + String(temp.length()) + "/" + String(OUT_MESSAGE_RESERVE_SIZE + "]"));
+					break;
+				}
 			}
 		}
 		_outDataPackets += "\n";
-
+		if (printToSerial)
+		{
+			Serial.print("\n");
+		}
 		return true;
 	}
 	return false;
 }
 
+bool EmotiBit::addPacket(uint32_t timestamp, EmotiBit::DataType t, float * data, size_t dataLen, uint8_t precision) 
+{	
+	return addPacket(timestamp, typeTags[(uint8_t)t], data, dataLen, precision, _sendSerialData[(uint8_t)t]);	
+	// ToDo: implement logic to determine return val
+	return true;
+}
+
 bool EmotiBit::addPacket(EmotiBit::DataType t) {
-#ifdef DEBUG_GET_DATA
-	Serial.print("addPacket: ");
-	Serial.println((uint8_t)t);
-#endif // DEBUG
 	float * data;
 	uint32_t timestamp;
 	size_t dataLen;
 
-	dataLen = getData(t, &data, &timestamp);
-
-	if (dataLen > 0)
+	if (t == EmotiBit::DataType::DATA_CLIPPING || t == EmotiBit::DataType::DATA_OVERFLOW) 
 	{
-		_newDataAvailable[(uint8_t)t] = true;	// set new data is available in the outputBuffer
+		// Handle clippping and overflow as a special case
+		dataLen = 0;
+		timestamp = millis();
+		for (int16_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+		{
+			if (i != (uint8_t)EmotiBit::DataType::DATA_CLIPPING && i != (uint8_t)EmotiBit::DataType::DATA_OVERFLOW)
+			{
+				size_t count = 0;
+				// Count all the events across all the buffers to get dataLen
+				if (t == EmotiBit::DataType::DATA_CLIPPING)
+				{
+					count = dataDoubleBuffers[i]->getClippedCount(DoubleBufferFloat::BufferSelector::OUT);
+				}
+				if (t == EmotiBit::DataType::DATA_OVERFLOW)
+				{
+					count = dataDoubleBuffers[i]->getOverflowCount(DoubleBufferFloat::BufferSelector::OUT);
+				}
+				if (DC_DO_V2)
+				{
+					if (count > 0)
+					{
+						// Data sent as TYPE, #, etc
+						// ToDo: consider whether dataLen should be counted per delimter (+=2) or per DataType (+=1)
+						dataLen += 2;
+					}
+				}
+				else
+				{
+					dataLen += count;
+				}
+			}
+		}
+	}
+	else
+	{
+		dataLen = dataDoubleBuffers[(uint8_t)t]->getData(&data, &timestamp, false);
+		if (dataLen > 0)
+		{
+			// ToDo: Consider moving _newDataAvailable set to processData()
+			_newDataAvailable[(uint8_t)t] = true;	// set new data is available in the outputBuffer
+		}
 	}
 
-	if (sendData[(uint8_t)t]) {
-		return addPacket(timestamp, t, data, dataLen, printLen[(uint8_t)t]);
+	if (_sendData[(uint8_t)t]) {
+		return addPacket(timestamp, t, data, dataLen, _printLen[(uint8_t)t]);
 	}
 	return false;
 }
@@ -943,10 +1466,16 @@ void EmotiBit::parseIncomingControlPackets(String &controlPackets, uint16_t &pac
 		{
 			if (header.typeTag.equals(EmotiBitPacket::TypeTag::RECORD_BEGIN)) 
 			{
+#ifdef ADAFRUIT_FEATHER_M0
 				stopTimer();	// stop the data sampling timer
+#endif
 				String datetimeString = packet.substring(dataStartChar, packet.length());
 				// Write the configuration info to json file
+#if defined(ARDUINO_FEATHER_ESP32)
+				String infoFilename = "/" + datetimeString + "_info.json";
+#else
 				String infoFilename = datetimeString + "_info.json";
+#endif
 				_dataFile = SD.open(infoFilename, FILE_WRITE);
 				if (_dataFile) {
 					if (!printConfigInfo(_dataFile, datetimeString)) {
@@ -958,8 +1487,17 @@ void EmotiBit::parseIncomingControlPackets(String &controlPackets, uint16_t &pac
 				// Try to open the data file to be sure we can write
 				_sdCardFilename = datetimeString + ".csv";
 				uint32_t start_timeOpenFile = millis();
+#if defined ARDUINO_FEATHER_ESP32
+				_dataFile = SD.open("/" + _sdCardFilename, FILE_WRITE);
+#else 
 				_dataFile = SD.open(_sdCardFilename, O_CREAT | O_WRITE | O_AT_END);
+#endif
 				if (_dataFile) {
+					// Clear the data buffers before writing to file to avoid mismatches
+					processData();
+					sendData();
+					processData();
+					sendData();
 					_sdWrite = true;
 					Serial.print("** Recording Begin: ");
 					Serial.print(_sdCardFilename);
@@ -971,7 +1509,9 @@ void EmotiBit::parseIncomingControlPackets(String &controlPackets, uint16_t &pac
 				}
 				if (!_sendTestData)
 				{
+#ifdef ADAFRUIT_FEATHER_M0
 					startTimer(BASE_SAMPLING_FREQ); // start up the data sampling timer
+#endif
 				}
 			}
 			else if (header.typeTag.equals(EmotiBitPacket::TypeTag::RECORD_END)) { // Recording end
@@ -1024,7 +1564,12 @@ void EmotiBit::updateButtonPress()
 		{
 			Serial.print("onLongPress: ");
 			Serial.println(millis() - buttonPressedTimer);
-			// ToDo: Send BL packet
+			EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::BUTTON_PRESS_LONG, _outDataPacketCounter++, "", 0);
+			_outDataPackets += "\n";
+			if (testingMode == TestingMode::FACTORY_TEST)
+			{
+				EmotiBitFactoryTest::sendMessage(EmotiBitPacket::TypeTag::BUTTON_PRESS_LONG);
+			}
 			(onLongPressCallback());
 		}
 	}
@@ -1036,7 +1581,12 @@ void EmotiBit::updateButtonPress()
 			{
 				Serial.print("onShortPress: ");
 				Serial.println(millis() - buttonPressedTimer);
-				// ToDo: Send BS packet
+				EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::BUTTON_PRESS_SHORT, _outDataPacketCounter++, "", 0);
+				_outDataPackets += "\n";
+				if (testingMode == TestingMode::FACTORY_TEST)
+				{
+					EmotiBitFactoryTest::sendMessage(EmotiBitPacket::TypeTag::BUTTON_PRESS_SHORT);
+				}
 				(onShortPressCallback());
 			}
 		}
@@ -1047,37 +1597,35 @@ void EmotiBit::updateButtonPress()
 
 uint8_t EmotiBit::update()
 {
-	static uint16_t serialPrevAvailable = Serial.available();
-	if (Serial.available() > serialPrevAvailable)
+	if (testingMode == TestingMode::FACTORY_TEST)
 	{
-		// There's new data available on serial
-		// Print to show we're alive
-		//Serial.print(Serial.available());
-		//Serial.print(':');
-		//Serial.print(serialPrevAvailable);
-		//Serial.print(">");
-		//Serial.println(Serial.peek());
-		Serial.println("hi");
+		processFactoryTestMessages();
 	}
-	serialPrevAvailable = Serial.available();
-
-	if (_debugMode && edaCorrection == nullptr)
-	{
-		static String debugPackets;
-		processDebugInputs(debugPackets, _outDataPacketCounter);
-		_outDataPackets += debugPackets;
-		debugPackets = "";
-		if (_serialData != DataType::length)
+	else 
+	{	
+		// Print out EmotiBit info when serial available && not FACTORY_TEST
+		static uint16_t serialPrevAvailable = Serial.available();
+		if (Serial.available() > serialPrevAvailable)
 		{
-			writeSerialData(_serialData);
+			printEmotiBitInfo();
 		}
-	}
-	else
-	{
-		// if not in debug mode, or Eda Correction UPDATE mode, always clear the input serial buffer
-		if (edaCorrection == nullptr)
+		serialPrevAvailable = Serial.available();
+		
+		if (_debugMode)
 		{
-			while (Serial.available())
+			static String debugPackets;
+			processDebugInputs(debugPackets, _outDataPacketCounter);
+			_outDataPackets += debugPackets;
+			debugPackets = "";
+			if (_serialData != DataType::length)
+			{
+				writeSerialData(_serialData);
+			}
+		}
+		else
+		{
+			// if not in debug mode
+			while (Serial.available() > 0)
 			{
 				Serial.read();
 			}
@@ -1085,8 +1633,8 @@ uint8_t EmotiBit::update()
 		}
 	}
 
-
 	// Handle updating WiFi connction + syncing
+	_emotiBitWiFi.updateStatus(); // asynchronous WiFi.status() update
 	static String inSyncPackets;
 	_emotiBitWiFi.update(inSyncPackets, _outDataPacketCounter);
 	_outDataPackets += inSyncPackets;
@@ -1113,22 +1661,9 @@ uint8_t EmotiBit::update()
 		sendModePacket(sentModePacket, _outDataPacketCounter);
 	}
 
-	// function call to handle UPDATE mode in Eda Correction
-	if (edaCorrection != nullptr)
-	{
-		edaCorrection->update(&tempHumiditySensor, vRef1, vRef2, edaFeedbackAmpR);
-		// if the correction/calibration has been completed
-		if (edaCorrection->getMode() == EdaCorrection::Mode::NORMAL && edaCorrection->progress == EdaCorrection::Progress::FINISH)
-		{
-			delete edaCorrection;
-			edaCorrection = nullptr;
-			Serial.println("Deleted eda correction instance");
-			if (!edaCorrection->dummyWrite)
-			{
-				acquireData.tempHumidity = true;
-			}
-		}
-	}
+	// NOTE:: EdaCorrection is deprecated use EmotiBitEda
+	// NOTE:: An older firmware, v1.2.86 needs to be used to write EDA correction values to V3 (OTP) and below.
+	// Newer FW version can read both NVMs (EEPROM and OTP), but only have write ability for EEPROM
 
 
 	// Handle data buffer reading and sending
@@ -1151,46 +1686,23 @@ uint8_t EmotiBit::update()
 		}
 		else
 		{
-			bool newData = false;
+			// Perform data calculations in main loop
+			processData();
 
-			if (DIGITAL_WRITE_DEBUG) digitalWrite(14, HIGH);
+			// Send data to SD card and over wireless
+			sendData();
 
-			for (int16_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+			if (startBufferOverflowTest)
 			{
-				addPacket((EmotiBit::DataType) i);
-				if (_outDataPackets.length() > OUT_MESSAGE_RESERVE_SIZE - OUT_PACKET_MAX_SIZE)
-				{
-					// Avoid overrunning our reserve memory
-					if (DIGITAL_WRITE_DEBUG) digitalWrite(16, HIGH);
-
-					if (getPowerMode() == PowerMode::NORMAL_POWER)
-					{
-						_emotiBitWiFi.sendData(_outDataPackets);
-					}
-					writeSdCardMessage(_outDataPackets);
-					_outDataPackets = "";
-
-					if (DIGITAL_WRITE_DEBUG) digitalWrite(16, LOW);
-				}
+				startBufferOverflowTest = false;
+				bufferOverflowTest();
 			}
-			if (_outDataPackets.length() > 0)
-			{
-				if (getPowerMode() == PowerMode::NORMAL_POWER)
-				{
-					_emotiBitWiFi.sendData(_outDataPackets);
-				}
-				writeSdCardMessage(_outDataPackets);
-				_outDataPackets = "";
-			}
-
-			if (DIGITAL_WRITE_DEBUG) digitalWrite(14, LOW);
-
 		}
 	}
 
 	// Hibernate after writing data
 	if (getPowerMode() == PowerMode::HIBERNATE) {
-		Serial.println("Hibernate");
+		Serial.println("sleep");
 
 		// Clear the remaining data buffer
 		if (getPowerMode() == PowerMode::NORMAL_POWER)
@@ -1200,166 +1712,29 @@ uint8_t EmotiBit::update()
 		writeSdCardMessage(_outDataPackets);
 		_outDataPackets = "";
 
-		hibernate();
-	}
-}
-
-int8_t EmotiBit::updateEDAData() 
-{
-#ifdef DEBUG
-	Serial.println("updateEDAData()");
-#endif // DEBUG
-	int8_t status = 0;
-	static float edlTemp;	// Electrodermal Level in Volts
-	static float edrTemp;	// Electrodermal Response in Volts
-	static float edaTemp;	// Electrodermal Activity in Volts
-  static float sclTemp;	// Skin Conductance Level in uSeimens
-	static float scrTemp;	// Skin Conductance Response in uSeimens
-	static bool edlClipped = false;
-	static bool edrClipped = false;
-
-	// ToDo: Optimize calculations for EDA
-
-	// Check EDL and EDR voltages for saturation
-	edlTemp = analogRead(_edlPin);
-	edrTemp = analogRead(_edrPin);
-	
-	// Correct for offset correction only when not in ISR_CORRECTION_UPDATE
-	if (testingMode != TestingMode::ISR_CORRECTION_UPDATE)
-	{
-		edlTemp = edlTemp - _isrOffsetCorr;
-		edrTemp = edrTemp - _isrOffsetCorr;
+		sleep();
 	}
 
-	// Add data to buffer for sample averaging (oversampling)
-	edlBuffer.push_back(edlTemp);
-	edrBuffer.push_back(edrTemp);
-
-	// ToDo: move adc clipping limits to setup()
-	static const int adcClippingLowerLim = 20;
-	static const int adcClippingUpperLim = adcRes - 20;
-
-	// Check for data clipping
-	if (edlTemp < adcClippingLowerLim	|| edlTemp > adcClippingUpperLim
-		) 
+	// Auto-sleep when battery percent hits zero
+	float battPct;
+	size_t dataAvailable = readData(EmotiBit::DataType::BATTERY_PERCENT, &battPct, 1);
+	if (dataAvailable > 0 && !_debugMode)
 	{
-		edlClipped = true;
-		status = status | (int8_t) Error::DATA_CLIPPING;
-	}
-	// Check for data clipping
-	if (edrTemp < adcClippingLowerLim	|| edrTemp > adcClippingUpperLim
-		) 
-	{
-		edrClipped = true;
-		status = status | (int8_t)Error::DATA_CLIPPING;
+		// Smooth the heck out of the battPct before we use it to call sleep.
+		static DigitalFilter battSleepFilt = DigitalFilter(DigitalFilter::FilterType::IIR_LOWPASS,
+			((float) BASE_SAMPLING_FREQ) / ((float) BATTERY_SAMPLING_DIV) / ((float) batteryPercentBuffer.size()), 
+			0.2f);
+		if (battSleepFilt.filter(battPct) < 0.1)
+		{
+			sleep();
+		}
 	}
 	
-	if (edlBuffer.size() == _samplesAveraged.eda) {
-		static float edlRaw, edlTx;
-		static float edrRaw, edrTx;
-		//static uint32_t timestamp;
-
-		// Perform data averaging
-		edlTemp = average(edlBuffer);
-		edrTemp = average(edrBuffer);
-		// store raw values is case we need to transmit that over wifi
-		edlRaw = edlTemp;
-		edrRaw = edrTemp;
-		// Perform data conversion
-		edlTemp = edlTemp * _vcc / adcRes;	// Convert ADC to Volts
-		edrTemp = edrTemp * _vcc / adcRes;	// Convert ADC to Volts
-
-		if (testingMode == TestingMode::ISR_CORRECTION_UPDATE || testingMode == TestingMode::ISR_CORRECTION_TEST)
-		{
-			// transmit raw
-			edlTx = edlRaw; 
-			edrTx = edrRaw;
-		}
-		else
-		{
-			// transmit converted to volts
-			edlTx = edlTemp; 
-			edrTx = edrTemp;
-		}
-
-		// send raw EDL values
-		pushData(EmotiBit::DataType::EDL, edlTx, &edlBuffer.timestamp);
-		if (edlClipped) {
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::EDL, &edlBuffer.timestamp);
-		}
-
-		pushData(EmotiBit::DataType::EDR, edrTx, &edrBuffer.timestamp);
-		if (edrClipped) {
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::EDR, &edrBuffer.timestamp);
-		}
-
-
-		// EDL Digital Filter
-		if (edaCrossoverFilterFreq > 0)// use only is a valid crossover freq is assigned
-		{
-			static DigitalFilter filterEda(DigitalFilter::FilterType::IIR_LOWPASS, (_samplingRates.eda / _samplesAveraged.eda), edaCrossoverFilterFreq);
-			if (_enableDigitalFilter.eda)
-			{
-				edlTemp = filterEda.filter(edlTemp);
-			}
-		}
-		// Link to diff amp biasing: https://ocw.mit.edu/courses/media-arts-and-sciences/mas-836-sensor-technologies-for-interactive-environments-spring-2011/readings/MITMAS_836S11_read02_bias.pdf
-		edaTemp = (edrTemp - vRef2) / edrAmplification;	// Remove VGND bias and amplification from EDR measurement
-		edaTemp = edaTemp + edlTemp;                     // Add EDR to EDL in Volts
-
-		//edaTemp = (_vcc - edaTemp) / edaVDivR * 1000000.f;						// Convert EDA voltage to uSeimens
-
-		if (edaTemp - vRef1 < 0.000086f)
-		{
-			edaTemp = 0.001f; // Clamp the EDA measurement at 1K Ohm (0.001 Siemens)
-		}
-		else
-		{
-			edaTemp = vRef1 / ((edaFeedbackAmpR * (edaTemp - vRef1)) - (_edaSeriesResistance * vRef1));
-		}
-
-		edaTemp = edaTemp * 1000000.f; // Convert to uSiemens
-
-
-		// Add to data double buffer
-		status = status | pushData(EmotiBit::DataType::EDA, edaTemp, &edrBuffer.timestamp);
-		if (edlClipped || edrClipped) {
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::EDA, &edrBuffer.timestamp);
-		}
-
-		// Clear the averaging buffers
-		edlBuffer.clear();
-		edrBuffer.clear();
-		edlClipped = false;
-		edrClipped = false;
-	}
-
-	// ToDo: Consider moving calculation into getData
-
-	// EDA -> Iskin
-	//tempEda = edaLow + (edaHigh / edaHPAmplification);
-	//tempEda = (1.f - tempEda / _adcRes) * _vcc / _edaVDivR; // Iskin calculation
-	////tempEda = tempEda * _edaVDivR / (_adcRes - _edaVDivR); // Rskin calculation
-	//if (eda.push_back(tempEda) == BufferFloat::ERROR_BUFFER_OVERFLOW) {
-	//	status = (int8_t)Error::BUFFER_OVERFLOW;
-	//}
-
-	////// EDL, EDR -> Rskin
-	//tempEda = edaLow;
-	////tempEda = tempEda * _edaVDivR / (_adcRes - _edaVDivR); // Rskin calculation
-	//tempEda = tempEda * _vcc / _adcRes;
-	//if (edl.push_back(tempEda) == BufferFloat::ERROR_BUFFER_OVERFLOW) {
-	//	status = (int8_t)Error::BUFFER_OVERFLOW;
-	//}
-	//tempEda = edaHigh;
-	////tempEda = tempEda * _edaVDivR / (_adcRes - _edaVDivR); // Rskin calculation
-	//tempEda = tempEda * _vcc / _adcRes;
-	//if (edr.push_back(tempEda) == BufferFloat::ERROR_BUFFER_OVERFLOW) {
-	//	status = (int8_t)Error::BUFFER_OVERFLOW;
-	//}
-
-	return status;
+	// ToDo: implement logic to determine return val
+	return 0;
 }
+
+
 int8_t EmotiBit::updatePPGData() {
 #ifdef DEBUG
 	Serial.println("updatePPGData()");
@@ -1433,12 +1808,41 @@ int8_t EmotiBit::updateTempHumidityData() {
 		//}
 			
 	}
-	_EmotiBit_i2c->setClock(400000);
+	_EmotiBit_i2c->setClock(i2cClkMain);
 	return status;
 }
-
+int8_t EmotiBit::updatePpgTempData()
+{
+	uint8_t status = 0;
+	float temperature;
+	static bool firstTime = true;
+	static DigitalFilter filterTemp1(DigitalFilter::FilterType::IIR_LOWPASS, _samplingRates.temperature_1, 1);
+	if (firstTime)
+	{
+		ppgSensor.startTempMeasurement();
+		firstTime = false;
+	}
+	
+	if (ppgSensor.getTemperature(temperature))
+	{
+		temperature = filterTemp1.filter(temperature);
+		status = status | pushData(EmotiBit::DataType::TEMPERATURE_1, temperature);
+		ppgSensor.startTempMeasurement();
+	}
+	else
+	{
+		// pinged sensor too early.
+		status = status | (int8_t)EmotiBit::Error::SENSOR_NOT_READY;
+	}
+	// ToDo: implement logic to determine return val
+	return 0;
+}
 
 int8_t EmotiBit::updateThermopileData() {
+#ifdef DEBUG_THERM_UPDATE
+	Serial.println("updateThermopileData");
+#endif
+	if (DIGITAL_WRITE_DEBUG) digitalWrite(DEBUG_OUT_PIN_1, HIGH);
 	// Thermopile
 	int8_t status = 0;
 	uint32_t timestamp;
@@ -1451,45 +1855,49 @@ int8_t EmotiBit::updateThermopileData() {
 			// First time through step mode just starts a measurement
 			MLX90632::status returnError;
 			thermopile.startRawSensorValues(returnError);
-			thermopileBegun = true;
+			if (returnError == MLX90632::status::SENSOR_SUCCESS)
+			{
+				thermopileBegun = true;
+				status = status | (int8_t)EmotiBit::Error::NONE;
+			}
 		}
 		else {
-
 			thermStatus = MLX90632::status::SENSOR_NO_NEW_DATA;
-			//while (thermStatus != MLX90632::status::SENSOR_SUCCESS)
-			//{
 			thermopile.getRawSensorValues(thermStatus, AMB, Sto); //Get the temperature of the object we're looking at in C
-			timestamp = millis();
-			//}
-			status = status | therm0AMB.push_back(AMB, &(timestamp));
-			// if DataOverflow
-			if (status & BufferFloat::ERROR_BUFFER_OVERFLOW == BufferFloat::ERROR_BUFFER_OVERFLOW) 
+#ifdef DEBUG_THERM_UPDATE
+			Serial.println("AMB " + String(AMB));
+			Serial.println("Sto " + String(Sto));
+			Serial.println("thermStatus " + String(thermStatus));
+#endif
+			if (thermStatus == MLX90632::status::SENSOR_SUCCESS)
 			{
-				// store the buffer overflow type and time
-				dataDoubleBuffers[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]->push_back((uint8_t)DataType::THERMOPILE, &timestamp);
+				if (DIGITAL_WRITE_DEBUG) digitalWrite(DEBUG_OUT_PIN_2, HIGH);
+				timestamp = millis();
+				status = status | therm0AMB.push_back(AMB, &(timestamp));
+				status = status | therm0Sto.push_back(Sto, &(timestamp));
+				thermopile.startRawSensorValues(thermStatus);
+				if (DIGITAL_WRITE_DEBUG) digitalWrite(DEBUG_OUT_PIN_2, LOW);
 			}
-			status = status | therm0Sto.push_back(Sto, &(timestamp));
-			thermopile.startRawSensorValues(thermStatus);
-			return (int8_t)EmotiBit::Error::BUFFER_OVERFLOW;
+			else
+			{
+				status = status | (int8_t)EmotiBit::Error::SENSOR_NOT_READY;
+			}
 		}
 	}
 	else if (thermopileMode == MODE_CONTINUOUS) {
-		// Continuouts mode reads at the set rate and returns data if ready
+		// Continuous mode reads at the set rate and returns data if ready
 		thermopile.getRawSensorValues(thermStatus, AMB, Sto);
-		timestamp = millis();
 
 		if (thermStatus == MLX90632::status::SENSOR_SUCCESS)
 		{
+			timestamp = millis();
 			status = status | therm0AMB.push_back(AMB, &(timestamp));
-			if (status & BufferFloat::ERROR_BUFFER_OVERFLOW == BufferFloat::ERROR_BUFFER_OVERFLOW)
-			{
-				// store the buffer overflow type and time
-				dataDoubleBuffers[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]->push_back((uint8_t)DataType::THERMOPILE, &timestamp);
-			}
 			status = status | therm0Sto.push_back(Sto, &(timestamp));
 		}
 	}
 	
+	_thermReadFinishedTime = micros();
+	if (DIGITAL_WRITE_DEBUG) digitalWrite(DEBUG_OUT_PIN_1, LOW);
 	return status;
 }
 
@@ -1515,7 +1923,7 @@ int8_t EmotiBit::updateIMUData() {
 			// ToDo: assess IMU buffer overflow more accurately
 			for (uint8_t j = (uint8_t)EmotiBit::DataType::ACCELEROMETER_X; j <= (uint8_t)EmotiBit::DataType::MAGNETOMETER_Z; j++) {
 				// Note: this for loop usage relies on all IMU data types being grouped from AX to MZ
-				dataDoubleBuffers[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]->push_back(j, &timestamp);
+				dataDoubleBuffers[j]->incrOverflowCount(DoubleBufferFloat::BufferSelector::IN);
 				imuBufferFull = true;
 			}
 		}
@@ -1536,11 +1944,12 @@ int8_t EmotiBit::updateIMUData() {
 			bool bufferMaxed = false;
 			for (uint8_t k = (uint8_t)EmotiBit::DataType::ACCELEROMETER_X; k <= (uint8_t)EmotiBit::DataType::MAGNETOMETER_Z; k++) {
 				// Note: this for loop usage relies on all IMU data types being grouped from AX to MZ
-				if (dataDoubleBuffers[k]->inSize() == dataDoubleBuffers[k]->inCapacity()) {
+				if (dataDoubleBuffers[k]->size(DoubleBufferFloat::BufferSelector::IN) == dataDoubleBuffers[k]->capacity(DoubleBufferFloat::BufferSelector::IN)) {
 					bufferMaxed = true;
 				}
 			}
 			if (bufferMaxed && !imuBufferFull) {
+				// ToDo: Consider how to improve logic so that chip buffer is incrementally emptied rather than dumped into DO events
 				// data is about to overflow... leave it on the FIFO unless FIFO is also full
 				break;
 			}
@@ -1549,8 +1958,9 @@ int8_t EmotiBit::updateIMUData() {
 				BMI160.extractMotion9(_imuBuffer, &ax, &ay, &az, &gx, &gy, &gz, &mx, &my, &mz, &rh);
 			}
 			else {
-				Serial.println("UNHANDLED CASE: _imuFifoFrameLen != 20");
-				while (true);
+				Serial.print("UNHANDLED CASE: _imuFifoFrameLen != 20: ");
+				Serial.println(_imuFifoFrameLen);
+				//while (true);
 				// ToDo: Handle case when _imuFifoFrameLen < 20
 			}
 		}
@@ -1604,15 +2014,17 @@ int8_t EmotiBit::updateIMUData() {
 		pushData(EmotiBit::DataType::MAGNETOMETER_Y, my, &timestamp);
 		pushData(EmotiBit::DataType::MAGNETOMETER_Z, mz, &timestamp);
 		if (bmm150XYClipped) {
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::MAGNETOMETER_X, &timestamp);
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::MAGNETOMETER_Y, &timestamp);
+			dataDoubleBuffers[(uint8_t)EmotiBit::DataType::MAGNETOMETER_X]->incrClippedCount(DoubleBufferFloat::BufferSelector::IN);
+			dataDoubleBuffers[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Y]->incrClippedCount(DoubleBufferFloat::BufferSelector::IN);
 			bmm150XYClipped = false;
 		}
 		if (bmm150ZHallClipped) {
-			pushData(EmotiBit::DataType::DATA_CLIPPING, (uint8_t)EmotiBit::DataType::MAGNETOMETER_Z, &timestamp);
+			dataDoubleBuffers[(uint8_t)EmotiBit::DataType::MAGNETOMETER_Z]->incrClippedCount(DoubleBufferFloat::BufferSelector::IN);
 			bmm150ZHallClipped = false;
 		}
 	}
+	// ToDo: implement logic to determine return val
+	return 0;
 }
 
 float EmotiBit::convertRawAcc(int16_t aRaw) {
@@ -1629,7 +2041,8 @@ float EmotiBit::convertRawGyro(int16_t gRaw) {
 
 int8_t EmotiBit::checkIMUClipping(EmotiBit::DataType type, int16_t data, uint32_t timestamp) {
 	if (data == 32767 || data == -32768) {
-		pushData(EmotiBit::DataType::DATA_CLIPPING, (int)type, &timestamp);
+		//pushData(EmotiBit::DataType::DATA_CLIPPING, (int)type, &timestamp);
+		dataDoubleBuffers[(uint8_t)type]->incrClippedCount(DoubleBufferFloat::BufferSelector::IN);
 		return (int8_t) EmotiBit::Error::DATA_CLIPPING;
 	} 
 	else {
@@ -1760,14 +2173,16 @@ float EmotiBit::convertMagnetoZ(int16_t mag_data_z, uint16_t data_rhall)
 }
 
 int8_t EmotiBit::pushData(EmotiBit::DataType type, float data, uint32_t * timestamp) {
+	//Serial.print("TypeTag: "); Serial.println(typeTags[(uint8_t)type]);
 	if ((uint8_t)type < (uint8_t)EmotiBit::DataType::length) {
-		if (timestamp == nullptr) {
-			*timestamp = millis();
-		}
 		uint8_t status = dataDoubleBuffers[(uint8_t)type]->push_back(data, timestamp);
+
 		if (status & BufferFloat::ERROR_BUFFER_OVERFLOW == BufferFloat::ERROR_BUFFER_OVERFLOW) {
+			// NOTE: DATA_OVERFLOW count is now stored in DoubleBufferFloat without a separate buffer
+
 			// store the buffer overflow type and time
-			dataDoubleBuffers[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]->push_back((uint8_t)type, timestamp);
+			//dataDoubleBuffers[(uint8_t)EmotiBit::DataType::DATA_OVERFLOW]->push_back((uint8_t)type, timestamp);
+
 			return (int8_t)EmotiBit::Error::BUFFER_OVERFLOW;
 		}
 		//else if (status & BufferFloat::PUSH_WHILE_GETTING == BufferFloat::PUSH_WHILE_GETTING) {
@@ -1783,87 +2198,162 @@ int8_t EmotiBit::pushData(EmotiBit::DataType type, float data, uint32_t * timest
 	}
 }
 
-size_t EmotiBit::getDataThermopile(float **data, uint32_t *timestamp)
+bool EmotiBit::processThermopileData()
 {
+#ifdef DEBUG_THERM_PROCESS
+	Serial.println("EmotiBit::processThermopileData");
+#endif
+
 	size_t sizeAMB;
 	size_t sizeSto;
+	size_t n;
 	float* dataAMB;
 	float* dataSto;
-	uint32_t* timestampSto;
-	sizeAMB = therm0AMB.getData(&dataAMB, timestamp);
-	sizeSto = therm0Sto.getData(&dataSto, timestampSto);
+	uint32_t timestampAmb;
+	uint32_t timestampSto;
+
+	static const int samplingInterval = 1000000 / (_samplingRates.thermopile * _samplesAveraged.thermopile);
+	static const int minSwapTime = max(500, min(samplingInterval / 10, 10000));
+
+	//Serial.println("window: " + String(samplingInterval - (micros() - _thermReadFinishedTime)));
+	unsigned long int waitStart = micros();
+	unsigned long int waitEnd = micros();
+	unsigned long int readFinishedTime = _thermReadFinishedTime;
+	while (samplingInterval - (waitEnd - readFinishedTime) < minSwapTime)
+	{
+		// Wait until we have at least minSwapTime usec to do swap
+		//Serial.println("WAIT");
+		if (waitEnd - waitStart > 100000)
+		{
+			Serial.println("Timeout waiting for _thermReadFinishedTime");
+			break;
+		}
+		waitEnd = micros();
+		readFinishedTime = _thermReadFinishedTime;
+	}
+	
+	// Swap buffers with minimal delay to avoid size mismatch
+	unsigned long int swapStart = micros();
+	therm0AMB.swap();
+	therm0Sto.swap();
+	unsigned long int swapEnd = micros();
+	//Serial.println("swap: " + String(swapEnd - swapStart));
+	
+	// Get pointers to the data buffers
+	sizeAMB = therm0AMB.getData(&dataAMB, &timestampAmb, false);
+	sizeSto = therm0Sto.getData(&dataSto, &timestampSto, false);
+#ifdef DEBUG_THERM_PROCESS
+	Serial.println("sizeof(therm0AMB) " + String(sizeAMB));
+	Serial.println("sizeof(therm0Sto) " + String(sizeSto));
+#endif
+
 	if (sizeAMB != sizeSto) // interrupt hit between therm0AMB.getdata and therm0Sto.getdata
 	{
-		// sizeAMB = k
-		// SizeSto = k+s ; where s= #sampepls added per interrupt
-		for (uint8_t i = sizeAMB; i < sizeSto; i++)
-		{
-			therm0Sto.push_back(dataSto[i], timestampSto);
-		}
-		sizeSto = sizeAMB;
+		Serial.println("WARNING: therm0AMB and therm0Sto buffers different sizes");
+		Serial.println("minSwapTime: " + String(minSwapTime));
+		Serial.println("_thermReadFinishedTime: " + String(_thermReadFinishedTime));
+		Serial.println("readFinishedTime: " + String(readFinishedTime));
+		Serial.println("waitEnd: " + String(waitEnd));
+		Serial.println("waitStart: " + String(waitStart));
+		Serial.println("micros(): " + String(micros()));
+		Serial.println("window: " + String(samplingInterval - (waitEnd - readFinishedTime)));
+		Serial.println("swap: " + String(swapEnd - swapStart));
+		Serial.println("sizeAMB: " + String(sizeAMB));
+		Serial.println("sizeSto: " + String(sizeSto));
+		// ToDo: Consider how to manage buffer size differences
+		// One fix option is to switch to ring buffers instead of double buffers
+		
+		// Previous approach is flawed because could have memory access collision:
+		// // sizeAMB = k
+		// // SizeSto = k+s ; where s= #sampepls added per interrupt
+		// for (uint8_t i = sizeAMB; i < sizeSto; i++)
+		// {
+			// therm0Sto.push_back(dataSto[i], timestampSto);
+		// }
+		// sizeSto = sizeAMB;
+		
+		// Add overflow event(s) to account for the mismatched sizes
+		size_t mismatch = abs(((int)sizeAMB) - ((int)sizeSto));
+		therm0AMB.incrOverflowCount(DoubleBufferFloat::BufferSelector::OUT, mismatch);
+		therm0Sto.incrOverflowCount(DoubleBufferFloat::BufferSelector::OUT, mismatch);
 	}
-	else
+	n = min(sizeAMB, sizeSto);
+	for (uint8_t i = 0; i < n; i++)
 	{
-		for (uint8_t i = 0; i < sizeAMB; i++)
+#ifdef DEBUG_THERM_PROCESS
+		Serial.println("dataAMB " + String(dataAMB[i]));
+		Serial.println("dataSto " + String(dataSto[i]));
+#endif
+		// if dummy data was stored
+		if (dataAMB[i] == -2 && dataSto[i] == -2)
 		{
-			// if dummy data was stored
-			if (dataAMB[i] == -2 && dataSto[i] == -2)
+			dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE]->swap();
+			return true;
+			//return dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE]->getData(data, timestamp);
+		}
+		float objectTemp;
+		// toggle to true to create forced nan values on the thermopile data
+		bool createNan = false;
+		if (createNan)
+		{
+			// if createNan is true generate nan values with a 0.1 probablity. This is to test the MLX90632 library functionatlity that prevents one nan to recursively create only nan values.
+			int randNum = rand() % 10 + 1;
+			if (randNum <= 1)
 			{
-				return dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE]->getData(data, timestamp);
-			}
-			float objectTemp;
-			// toggle to true to create forced nan values on the thermopile data
-			bool createNan = false;
-			if (createNan)
-			{
-				// if createNan is true generate nan values with a 0.1 probablity. This is to test the MLX90632 library functionatlity that prevents one nan to recursively create only nan values.
-				int randNum = rand() % 10 + 1;
-				if (randNum <= 1)
-				{
-					// getObjectTemp(-3, -3) generates nan Temp value.
-					objectTemp = thermopile.getObjectTemp(-3, -3);
-					Serial.print("AMB for nan: -2");
-					Serial.println("\t Sto for nan: -2");
-				}
-				else
-				{
-					objectTemp = thermopile.getObjectTemp(dataAMB[i], dataSto[i]);
-				}
+				// getObjectTemp(-3, -3) generates nan Temp value.
+				objectTemp = thermopile.getObjectTemp(-3, -3);
+				Serial.print("AMB for nan: -2");
+				Serial.println("\t Sto for nan: -2");
 			}
 			else
 			{
 				objectTemp = thermopile.getObjectTemp(dataAMB[i], dataSto[i]);
 			}
-
-			if (isnan(objectTemp))
-			{
-				static String debugPacket;
-				static String payloadAMB;
-				static String payloadSto;
-				payloadAMB = "AMB val for nan:";
-				payloadSto = "Sto val fro nan:";
-				if (createNan)
-				{
-					payloadAMB += "-2";
-					payloadSto += "-2";
-				}
-				else
-				{
-					payloadAMB += String(dataAMB[i], 4);
-					payloadSto += String(dataSto[i], 4);
-				}
-				debugPacket += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, _outDataPacketCounter++, payloadAMB, 1);
-				debugPacket += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, _outDataPacketCounter++, payloadSto, 1);
-				_outDataPackets += debugPacket;
-				debugPacket = "";
-				payloadAMB = "";
-				payloadSto = "";
-			}
-			pushData(EmotiBit::DataType::THERMOPILE, objectTemp, timestamp);
 		}
-		return dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE]->getData(data, timestamp);
+		else
+		{
+			objectTemp = thermopile.getObjectTemp(dataAMB[i], dataSto[i]);
+#ifdef DEBUG_THERM_PROCESS
+			Serial.println(objectTemp);
+#endif
+		}
+
+		if (isnan(objectTemp))
+		{
+			static String debugPacket;
+			static String payloadAMB;
+			static String payloadSto;
+			payloadAMB = "AMB val for nan:";
+			payloadSto = "Sto val fro nan:";
+			if (createNan)
+			{
+				payloadAMB += "-2";
+				payloadSto += "-2";
+			}
+			else
+			{
+				payloadAMB += String(dataAMB[i], 4);
+				payloadSto += String(dataSto[i], 4);
+			}
+			debugPacket += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, _outDataPacketCounter++, payloadAMB, 1);
+			debugPacket += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, _outDataPacketCounter++, payloadSto, 1);
+			_outDataPackets += debugPacket;
+			debugPacket = "";
+			payloadAMB = "";
+			payloadSto = "";
+		}
+		pushData(EmotiBit::DataType::THERMOPILE, objectTemp, &timestampAmb);
 	}
-	
+	// Transfer overflow counts
+	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE]->incrOverflowCount(DoubleBufferFloat::BufferSelector::IN,
+		max(
+			therm0AMB.getOverflowCount(DoubleBufferFloat::BufferSelector::OUT),
+			therm0Sto.getOverflowCount(DoubleBufferFloat::BufferSelector::OUT)
+		)
+	);
+	dataDoubleBuffers[(uint8_t)EmotiBit::DataType::THERMOPILE]->swap();
+	// ToDo: implement logic to determine return val
+	return true;
 }
 
 
@@ -1873,75 +2363,103 @@ size_t EmotiBit::getData(DataType type, float** data, uint32_t * timestamp) {
 	Serial.println((uint8_t) t);
 #endif // DEBUG
 	if ((uint8_t)type < (uint8_t)EmotiBit::DataType::length) {
-		
-		if ((uint8_t)type == (uint8_t)EmotiBit::DataType::THERMOPILE)
-		{
-			return getDataThermopile(data, timestamp);
-		}
-		else
-		{
-			return dataDoubleBuffers[(uint8_t)type]->getData(data, timestamp);
-		}
+		return dataDoubleBuffers[(uint8_t)type]->getData(data, timestamp, false);
 	}
 	else {
 		return (int8_t)EmotiBit::Error::NONE;
 	}
 }
 
-int8_t EmotiBit::updateBatteryVoltageData() {
-	batteryVoltageBuffer.push_back(readBatteryVoltage());
+
+int8_t EmotiBit::updateBatteryData()
+{
+	int8_t status;
+	static DigitalFilter filterBattVolt(DigitalFilter::FilterType::IIR_LOWPASS, ((BASE_SAMPLING_FREQ) / (BATTERY_SAMPLING_DIV)) / (_samplesAveraged.battery), 0.01);
+	float battVolt = readBatteryVoltage();
+	battVolt = filterBattVolt.filter(battVolt);
+	float battPcent = getBatteryPercent(battVolt);
+	// update battery level indication
+	updateBatteryIndication(battPcent);
+	// update battery voltage buffers
+	status = updateBatteryVoltageData(battVolt);
+	// update battery percent buffers
+	status = updateBatteryPercentData(battPcent);
+	return 0;
+}
+
+int8_t EmotiBit::updateBatteryVoltageData(float battVolt) {
+	batteryVoltageBuffer.push_back(battVolt);
 	if (batteryVoltageBuffer.size() >= _samplesAveraged.battery) {
 		batteryVoltage.push_back(average(batteryVoltageBuffer));
 		batteryVoltageBuffer.clear();
 	}
+	// ToDo: implement logic to determine return val
+	return 0;
 }
 
 
-int8_t EmotiBit::updateBatteryPercentData() {
-	batteryPercentBuffer.push_back(readBatteryPercent());
+int8_t EmotiBit::updateBatteryPercentData(float battPcent) {
+	batteryPercentBuffer.push_back(battPcent);
 	if (batteryPercentBuffer.size() >= _samplesAveraged.battery) {
 		batteryPercent.push_back(average(batteryPercentBuffer));
 		batteryPercentBuffer.clear();
 	}
+	// ToDo: implement logic to determine return val
+	return 0;
 }
 
 float EmotiBit::readBatteryVoltage() {
-	float batRead = analogRead(_batteryReadPin);
+	float batRead;
+#if defined ARDUINO_FEATHER_ESP32
+	batRead = analogReadMilliVolts(_batteryReadPin);
+	batRead *= 2.f;
+	batRead = batRead / 1000.f; // convert mV to V
+#else
+	batRead = analogRead(_batteryReadPin);
 	//float batRead = 10000.f;
 	batRead *= 2.f;
 	batRead *= _vcc;
 	batRead /= adcRes; // ToDo: precalculate multiplier
+#endif
 	return batRead;
 }
 
-int8_t EmotiBit::readBatteryPercent() {
+int8_t EmotiBit::getBatteryPercent(float bv) {
 	// Thresholded bi-linear approximation
 	// See battery discharge profile here:
 	// https://www.richtek.com/Design%20Support/Technical%20Document/AN024
-	float bv = readBatteryVoltage();
+
 	int8_t result;
-	// ToDo: move teh filter to updateBatteryPercentData 
-	static DigitalFilter filterBatt(DigitalFilter::FilterType::IIR_LOWPASS, ((BASE_SAMPLING_FREQ)/(BATTERY_SAMPLING_DIV))/(_samplesAveraged.battery), 0.01);
-	if (bv > 4.15f) {
+
+#if defined ARDUINO_FEATHER_ESP32
+	const float V100 = 4.05f;
+	const float V0 = 3.4f;
+	const float FACTOR_V100_V0 = 1 / (V100 - V0) * 100.f; // Precalculate multiplier to save CPU
+	if (bv > V100) {
 		result = 100;
 	}
-	else if (bv > 3.65f) {
-		float temp;
-		temp = (bv - 3.65f);
-		temp /= (4.15f - 3.65f);
-		temp *= 93.f;
-		temp += 7.f;
+	else if (bv > V0) {
+		float temp = (bv - V0) * FACTOR_V100_V0;
 		result = (int8_t)temp;
 	}
-	else if (bv > 3.3f) {
-		float temp;
-		temp = (bv - 3.3f);
-		temp /= (4.65f - 3.3f);
-		temp *= 7.f;
-		temp += 0.f;
+	else {
+		result = 0;
+	}
+#elif defined(ADAFRUIT_FEATHER_M0)
+	const float V100 = 4.1f;
+	const float V0 = 3.56f;
+	const float FACTOR_V100_V0 = 1 / (V100 - V0) * 100.f; // Precalculate multiplier to save CPU
+	if (bv > V100) {
+		result = 100;
+	}
+	else if (bv > V0) {
+		float temp = (bv - V0) * FACTOR_V100_V0;
 		result = (int8_t)temp;
 	}
-	result = filterBatt.filter(result);
+	else {
+		result = 0;
+	}
+#endif
 	return result;
 	//else if (bv > 4.1f) {
 	//	return 95;
@@ -1991,6 +2509,8 @@ int8_t EmotiBit::readBatteryPercent() {
 bool EmotiBit::setSensorTimer(SensorTimer t) {
 	_sensorTimer = t;
 	// ToDo: add timer handling
+		// ToDo: implement logic to determine return val
+	return true;
 }
 
 
@@ -2000,9 +2520,7 @@ bool EmotiBit::printConfigInfo(File &file, const String &datetimeString) {
 	Serial.println("printConfigInfo");
 #endif
 	//bool EmotiBit::printConfigInfo(File file, String datetimeString) {
-	String source_id = "EmotiBit FeatherWing";
-	String hardware_version = EmotiBitVersionController::getHardwareVersion(_version);
-	String feather_version = "Adafruit Feather M0 WiFi";
+	String hardware_version = EmotiBitVersionController::getHardwareVersion(_hwVersion);
 
 	const uint16_t bufferSize = 1024;
 
@@ -2017,375 +2535,374 @@ bool EmotiBit::printConfigInfo(File &file, const String &datetimeString) {
 
 	file.print("["); // Doing some manual printing to chunk JSON and save RAM
 
+
+	{
+		// Write basic EmotiBit info
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
+		const uint8_t nInfo = 1;
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
+		uint8_t i = 0;
+		infos[i] = root.createNestedObject("info");
+		infos[i]["name"] = "EmotiBitData";
+		infos[i]["type"] = "Multimodal";
+		infos[i]["source_id"] = _sourceId;
+		infos[i]["hardware_version"] = hardware_version;
+		infos[i]["sku"] = emotiBitSku;
+		infos[i]["device_id"] = emotibitDeviceId;
+		infos[i]["feather_version"] = _featherVersion;
+		infos[i]["feather_wifi_mac_addr"] = getFeatherMacAddress();
+		infos[i]["firmware_version"] = firmware_version;
+		infos[i]["firmware_variant"] = firmware_variant;
+		infos[i]["created_at"] = datetimeString;
+		serializeJson(jsonDoc, file);
+	}
+
+	file.print(","); // Doing some manual printing to chunk JSON and save RAM
+
 	{
 		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
 		//JsonArray& root = jsonBuffer.createArray();
 		const uint8_t nInfo = 1;
 		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
 		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
+		infos[i] = root.createNestedObject("info");
 
 		// ToDo: Use EmotiBitPacket::TypeTag rather than fallable constants to set typeTags
 
 		// Accelerometer
 		//indices[i] = &(root.createNestedObject());
 		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "Accelerometer");
-		infos[i]->set("type", "Accelerometer");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("AX");
-		typeTags[i]->add("AY");
-		typeTags[i]->add("AZ");
-		infos[i]->set("channel_count", 3);
-		infos[i]->set("nominal_srate", _samplingRates.accelerometer);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "g");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("range", _accelerometerRange);
-		setups[i]->set("acc_bwp", imuSettings.acc_bwp);
-		setups[i]->set("acc_us", imuSettings.acc_us);
-
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
+		infos[i]["name"] = "Accelerometer";
+		infos[i]["type"] = "Accelerometer";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add("AX");
+		typeTags[i].add("AY");
+		typeTags[i].add("AZ");
+		infos[i]["channel_count"] = 3;
+		infos[i]["nominal_srate"] = _samplingRates.accelerometer;
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "g";
+		setups[i] = infos[i].createNestedObject("setup");
+		setups[i]["range"] = _accelerometerRange;
+		setups[i]["acc_bwp"] = imuSettings.acc_bwp;
+		setups[i]["acc_us"] = imuSettings.acc_us;
+		serializeJson(jsonDoc, file);
 	}
 
 	file.print(","); // Doing some manual printing to chunk JSON and save RAM
 
 	{
 		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
 		//JsonArray& root = jsonBuffer.createArray();
 		const uint8_t nInfo = 1;
 		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
 		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
+		infos[i] = root.createNestedObject("info");
 
 		// Gyroscope
 		//i++;
 		//indices[i] = &(root.createNestedObject());
 		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "Gyroscope");
-		infos[i]->set("type", "Gyroscope");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("GX");
-		typeTags[i]->add("GY");
-		typeTags[i]->add("GZ");
-		infos[i]->set("channel_count", 3);
-		infos[i]->set("nominal_srate", _samplingRates.gyroscope);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "degrees/second");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("range", _gyroRange);
-		setups[i]->set("gyr_bwp", imuSettings.gyr_bwp);
-		setups[i]->set("gyr_us", imuSettings.gyr_us);
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
+		infos[i]["name"] = "Gyroscope";
+		infos[i]["type"] = "Gyroscope";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add("GX");
+		typeTags[i].add("GY");
+		typeTags[i].add("GZ");
+		infos[i]["channel_count"] = 3;
+		infos[i]["nominal_srate"] = _samplingRates.gyroscope;
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "degrees/second";
+		setups[i] = infos[i].createNestedObject("setup");
+		setups[i]["range"] = _gyroRange;
+		setups[i]["gyr_bwp"] = imuSettings.gyr_bwp;
+		setups[i]["gyr_us"] = imuSettings.gyr_us;
+		serializeJson(jsonDoc, file);
 	}
 
 	file.print(","); // Doing some manual printing to chunk JSON and save RAM
 
 	{
 		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
 		//JsonArray& root = jsonBuffer.createArray();
 		const uint8_t nInfo = 1;
 		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
 		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
+		infos[i] = root.createNestedObject("info");
 
 		// Magnetometer
 		//i++;
 		//indices[i] = &(root.createNestedObject());
 		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "Magnetometer");
-		infos[i]->set("type", "Magnetometer");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("MX");
-		typeTags[i]->add("MY");
-		typeTags[i]->add("MZ");
-		infos[i]->set("channel_count", 3);
-		infos[i]->set("nominal_srate", _samplingRates.magnetometer);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "microhenries");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
+		infos[i]["name"] = "Magnetometer";
+		infos[i]["type"] = "Magnetometer";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add("MX");
+		typeTags[i].add("MY");
+		typeTags[i].add("MZ");
+		infos[i]["channel_count"] = 3;
+		infos[i]["nominal_srate"] = _samplingRates.magnetometer;
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "microhenries";
+		setups[i] = infos[i].createNestedObject("setup");
+		serializeJson(jsonDoc, file);
 	}
 
 	file.print(","); // Doing some manual printing to chunk JSON and save RAM
 
-	{
-		// EDA
-
-		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
-		const uint8_t nInfo = 1;
-		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
-		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
-		//i++;
-		infos[i]->set("name", "ElectrodermalActivity");
-		infos[i]->set("type", "ElectrodermalActivity");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("EA");
-		infos[i]->set("channel_count", 1);
-		infos[i]->set("nominal_srate", _samplingRates.eda / _samplesAveraged.eda);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "microsiemens");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("adc_bits", _adcBits);
-		setups[i]->set("voltage_reference_1", vRef1);
-		setups[i]->set("voltage_reference_2", vRef2);
-		setups[i]->set("EDA_feedback_amp_resistance", edaFeedbackAmpR);
-		setups[i]->set("EDR_amplification", edrAmplification);
-		setups[i]->set("EDL_digital_filter_alpha", _edlDigFiltAlpha);
-		setups[i]->set("EDA_crossover_filter_frequency", edaCrossoverFilterFreq);
-		setups[i]->set("samples_averaged", _samplesAveraged.eda);
-		setups[i]->set("oversampling_rate", _samplingRates.eda);		
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
-	}
+	emotibitEda.writeInfoJson(file);
 
 	file.print(","); // Doing some manual printing to chunk JSON and save RAM
 
+	if ((int)_hwVersion < (int)EmotiBitVersionController::EmotiBitVersion::V04A)
+	{
+		{
+			// Parse the root object
+			StaticJsonDocument<bufferSize> jsonDoc;
+			JsonObject root = jsonDoc.to<JsonObject>();
+			//JsonArray& root = jsonBuffer.createArray();
+			const uint8_t nInfo = 1;
+			//JsonObject* indices[nInfo];
+			JsonObject infos[nInfo];
+			JsonArray typeTags[nInfo];
+			JsonObject setups[nInfo];
+			uint8_t i = 0;
+			infos[i] = root.createNestedObject("info");
+			// Humidity0
+			//i++;
+			//indices[i] = &(root.createNestedObject());
+			//infos[i] = &(indices[i]->createNestedObject("info"));
+			infos[i]["name"] = "Humidity0";
+			infos[i]["type"] = "Humidity";
+			typeTags[i] = infos[i].createNestedArray("typeTags");
+			typeTags[i].add("H0");
+			infos[i]["channel_count"] = 1;
+			infos[i]["nominal_srate"] = _samplingRates.humidity / _samplesAveraged.humidity;
+			infos[i]["channel_format"] = "float";
+			infos[i]["units"] = "Percent";
+			setups[i] = infos[i].createNestedObject("setup");
+			setups[i]["resolution"] = "RESOLUTION_H11_T11";
+			setups[i]["samples_averaged"] = _samplesAveraged.humidity;
+			setups[i]["oversampling_rate"] = _samplingRates.humidity;
+			serializeJson(jsonDoc, file);
+		}
+
+		file.print(","); // Doing some manual printing to chunk JSON and save RAM
+
+		{
+			// Parse the root object
+			StaticJsonDocument<bufferSize> jsonDoc;
+			JsonObject root = jsonDoc.to<JsonObject>();
+			//JsonArray& root = jsonBuffer.createArray();
+			const uint8_t nInfo = 1;
+			//JsonObject* indices[nInfo];
+			JsonObject infos[nInfo];
+			JsonArray typeTags[nInfo];
+			JsonObject setups[nInfo];
+			uint8_t i = 0;
+			infos[i] = root.createNestedObject("info");
+			// Temperature0
+			//i++;
+			//indices[i] = &(root.createNestedObject());
+			//infos[i] = &(indices[i]->createNestedObject("info"));
+			infos[i]["name"] = "Temperature0";
+			infos[i]["type"] = "Temperature";
+			typeTags[i] = infos[i].createNestedArray("typeTags");
+			typeTags[i].add("T0");
+			infos[i]["channel_count"] = 1;
+			infos[i]["nominal_srate"] = _samplingRates.temperature / _samplesAveraged.temperature;
+			infos[i]["channel_format"] = "float";
+			infos[i]["units"] = "degrees celcius";
+			infos[i]["sensor_part_number"] = "Si7013";
+			infos[i]["sensor_serial_number_a"] = tempHumiditySensor.sernum_a;
+			infos[i]["sensor_serial_number_b"] = tempHumiditySensor.sernum_b;
+			setups[i] = infos[i].createNestedObject("setup");
+			setups[i]["resolution"] = "RESOLUTION_H11_T11";
+			setups[i]["samples_averaged"] = _samplesAveraged.temperature;
+			setups[i]["oversampling_rate"] = _samplingRates.temperature;
+			serializeJson(jsonDoc, file);
+		}
+		file.print(","); // Doing some manual printing to chunk JSON and save RAM
+	}
+	
 	{
 		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
 		//JsonArray& root = jsonBuffer.createArray();
 		const uint8_t nInfo = 1;
 		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
 		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
-		// Humidity0
-		//i++;
-		//indices[i] = &(root.createNestedObject());
-		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "Humidity0");
-		infos[i]->set("type", "Humidity");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("H0");
-		infos[i]->set("channel_count", 1);
-		infos[i]->set("nominal_srate", _samplingRates.humidity / _samplesAveraged.humidity);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "Percent");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("resolution", "RESOLUTION_H11_T11");
-		setups[i]->set("samples_averaged", _samplesAveraged.humidity);
-		setups[i]->set("oversampling_rate", _samplingRates.humidity);
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
-	}
-
-	file.print(","); // Doing some manual printing to chunk JSON and save RAM
-
-	{
-		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
-		//JsonArray& root = jsonBuffer.createArray();
-		const uint8_t nInfo = 1;
-		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
-		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
+		infos[i] = root.createNestedObject("info");
 		// Temperature0
 		//i++;
 		//indices[i] = &(root.createNestedObject());
 		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "Temperature0");
-		infos[i]->set("type", "Temperature");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("T0");
-		infos[i]->set("channel_count", 1);
-		infos[i]->set("nominal_srate", _samplingRates.temperature / _samplesAveraged.temperature);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "degrees celcius");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("sensor_part_number", "Si7013");
-		infos[i]->set("sensor_serial_number_a", tempHumiditySensor.sernum_a);
-		infos[i]->set("sensor_serial_number_b", tempHumiditySensor.sernum_b);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("resolution", "RESOLUTION_H11_T11");
-		setups[i]->set("samples_averaged", _samplesAveraged.temperature);
-		setups[i]->set("oversampling_rate", _samplingRates.temperature);
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
+		infos[i]["name"] = "Temperature1";
+		infos[i]["type"] = "Temperature";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add("T1");
+		infos[i]["channel_count"] = 1;
+		infos[i]["nominal_srate"] = _samplingRates.temperature_1 / _samplesAveraged.temperature_1;
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "degrees celcius";
+		infos[i]["sensor_part_number"] = "MAX30101";
+		setups[i] = infos[i].createNestedObject("setup");
+		setups[i]["samples_averaged"] = _samplesAveraged.temperature_1;
+		setups[i]["oversampling_rate"] = _samplingRates.temperature_1;
+		serializeJson(jsonDoc, file);
 	}
-
+	
 	file.print(","); // Doing some manual printing to chunk JSON and save RAM
 
 	{
 		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
 		//JsonArray& root = jsonBuffer.createArray();
 		const uint8_t nInfo = 1;
 		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
 		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
+		infos[i] = root.createNestedObject("info");
 
 		// thermopile
 		//i++;
 		//indices[i] = &(root.createNestedObject());
 		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "Thermopile");
-		infos[i]->set("type", "Temperature");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("TH");
-		infos[i]->set("channel_count", 1);
+		infos[i]["name"] = "Thermopile";
+		infos[i]["type"] = "Temperature";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add("TH");
+		infos[i]["channel_count"] = 1;
 		if (thermopileMode == MODE_CONTINUOUS)
 		{
-			infos[i]->set("nominal_srate", thermopileFs);
+			infos[i]["nominal_srate"] = thermopileFs;
 		}
 		else
 		{
-			infos[i]->set("nominal_srate", _samplingRates.thermopile / _samplesAveraged.thermopile);
+			infos[i]["nominal_srate"] = _samplingRates.thermopile / _samplesAveraged.thermopile;
 		}
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "degrees celcius");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("samples_averaged", _samplesAveraged.thermopile);
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "degrees celcius";
+		setups[i] = infos[i].createNestedObject("setup");
+		setups[i]["samples_averaged"] = _samplesAveraged.thermopile;
 		if (thermopileMode == MODE_CONTINUOUS)
 		{
-			infos[i]->set("oversampling_rate", thermopileFs);
+			infos[i]["oversampling_rate"] = thermopileFs;
 		}
 		else
 		{
-			setups[i]->set("oversampling_rate", _samplingRates.thermopile);
+			setups[i]["oversampling_rate"] = _samplingRates.thermopile;
 		}
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
+		serializeJson(jsonDoc, file);
 	}
 
 	file.print(","); // Doing some manual printing to chunk JSON and save RAM
 
 	{
 		// Parse the root object
-		StaticJsonBuffer<bufferSize> jsonBuffer;
-		JsonObject &root = jsonBuffer.createObject();
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
 		//JsonArray& root = jsonBuffer.createArray();
 		const uint8_t nInfo = 1;
 		//JsonObject* indices[nInfo];
-		JsonObject* infos[nInfo];
-		JsonArray* typeTags[nInfo];
-		JsonObject* setups[nInfo];
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
 		uint8_t i = 0;
-		infos[i] = &(root.createNestedObject("info"));
+		infos[i] = root.createNestedObject("info");
 
 		// PPG
 		//i++;
 		//indices[i] = &(root.createNestedObject());
 		//infos[i] = &(indices[i]->createNestedObject("info"));
-		infos[i]->set("name", "PPG");
-		infos[i]->set("type", "PPG");
-		typeTags[i] = &(infos[i]->createNestedArray("typeTags"));
-		typeTags[i]->add("PI");
-		typeTags[i]->add("PR");
-		typeTags[i]->add("PG");
-		infos[i]->set("channel_count", 3);
-		infos[i]->set("nominal_srate", ppgSettings.sampleRate / ppgSettings.sampleAverage);
-		infos[i]->set("channel_format", "float");
-		infos[i]->set("units", "raw units");
-		infos[i]->set("source_id", source_id);
-		infos[i]->set("hardware_version", hardware_version);
-		infos[i]->set("feather_version", feather_version);
-		infos[i]->set("firmware_version", firmware_version);
-		infos[i]->set("created_at", datetimeString);
-		setups[i] = &(infos[i]->createNestedObject("setup"));
-		setups[i]->set("LED_power_level", ppgSettings.ledPowerLevel);
-		setups[i]->set("samples_averaged", ppgSettings.sampleAverage);
-		setups[i]->set("LED_mode", ppgSettings.ledMode);
-		setups[i]->set("oversampling_rate", ppgSettings.sampleRate);
-		setups[i]->set("pulse_width", ppgSettings.pulseWidth);
-		setups[i]->set("ADC_range", ppgSettings.adcRange);
-		if (root.printTo(file) == 0) {
-#ifdef DEBUG
-			Serial.println(F("Failed to write to file"));
-#endif
-		}
+		infos[i]["name"] = "PPG";
+		infos[i]["type"] = "PPG";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add("PI");
+		typeTags[i].add("PR");
+		typeTags[i].add("PG");
+		infos[i]["channel_count"] = 3;
+		infos[i]["nominal_srate"] = ppgSettings.sampleRate / ppgSettings.sampleAverage;
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "raw units";
+		setups[i] = infos[i].createNestedObject("setup");
+		setups[i]["LED_power_level"] = ppgSettings.ledPowerLevel;
+		setups[i]["samples_averaged"] = ppgSettings.sampleAverage;
+		setups[i]["LED_mode"] = ppgSettings.ledMode;
+		setups[i]["oversampling_rate"] = ppgSettings.sampleRate;
+		setups[i]["pulse_width"] = ppgSettings.pulseWidth;
+		setups[i]["ADC_range"] = ppgSettings.adcRange;
+		serializeJson(jsonDoc, file);
 	}
 
+	file.print(","); // Doing some manual printing to chunk JSON and save RAM
+	// Heart Rate
+	{
+		// Parse the root object
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
+		const uint8_t nInfo = 1;
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
+		uint8_t i = 0;
+		infos[i] = root.createNestedObject("info");
+		infos[i]["name"] = "HeartRate";
+		infos[i]["type"] = "PPG";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add(EmotiBitPacket::TypeTag::HEART_RATE);
+		infos[i]["channel_count"] = 1;
+		infos[i]["channel_format"] = "int";
+		infos[i]["units"] = "bpm";
+		serializeJson(jsonDoc, file);
+	}
+
+	file.print(","); // Doing some manual printing to chunk JSON and save RAM
+	// interBeat interval
+	{
+		// Parse the root object
+		StaticJsonDocument<bufferSize> jsonDoc;
+		JsonObject root = jsonDoc.to<JsonObject>();
+		const uint8_t nInfo = 1;
+		JsonObject infos[nInfo];
+		JsonArray typeTags[nInfo];
+		JsonObject setups[nInfo];
+		uint8_t i = 0;
+		infos[i] = root.createNestedObject("info");
+		infos[i]["name"] = "InterBeatInterval";
+		infos[i]["type"] = "PPG";
+		typeTags[i] = infos[i].createNestedArray("typeTags");
+		typeTags[i].add(EmotiBitPacket::TypeTag::INTER_BEAT_INTERVAL);
+		infos[i]["channel_count"] = 1;
+		infos[i]["channel_format"] = "float";
+		infos[i]["units"] = "mS";
+		serializeJson(jsonDoc, file);
+	}
 	file.print("]"); // Doing some manual printing to chunk JSON and save RAM
 
 	return true;
@@ -2428,19 +2945,22 @@ void EmotiBit::readSensors()
 #ifdef DEBUG_GET_DATA
 	Serial.println("readSensors()");
 #endif // DEBUG
-	if (DIGITAL_WRITE_DEBUG) digitalWrite(10, HIGH);
-	
-	uint32_t readSensorsBegin = micros();
-	
-	// Write to OTP once edaCorrection class is at the right state. 
-	if (edaCorrection != nullptr)
+	if (DIGITAL_WRITE_DEBUG) digitalWrite(DEBUG_OUT_PIN_0, HIGH);
+
+	static unsigned long readSensorsBegin = micros();
+	if (_debugMode)
 	{
-		if (edaCorrection->getMode() == EdaCorrection::Mode::UPDATE)
-		{
-			_EmotiBit_i2c->setClock(100000);// change the I2C clock speed to 100000
-			edaCorrection->writeToOtp(&tempHumiditySensor);
-			_EmotiBit_i2c->setClock(400000);// change the I2C clock speed back to 400000
-		}
+		readSensorsIntervalMin = min(readSensorsIntervalMin, (uint32_t)(micros()- readSensorsBegin));
+		readSensorsIntervalMax = max(readSensorsIntervalMax, (uint32_t)(micros() - readSensorsBegin));
+	}
+	readSensorsBegin = micros();
+	unsigned long read1SensorBegin = readSensorsBegin;
+
+	_emotibitNvmController.syncRW();
+	if (_debugMode)
+	{
+		readSensorsDurationMax.nvm = max(readSensorsDurationMax.nvm, (uint32_t)(micros() - read1SensorBegin));
+		read1SensorBegin = micros();
 	}
 
 	// Battery (all analog reads must be in the ISR)
@@ -2449,12 +2969,17 @@ void EmotiBit::readSensors()
 	{
 		static uint16_t batteryCounter = timerLoopOffset.battery;
 		if (batteryCounter == BATTERY_SAMPLING_DIV) {
-			battLevel = readBatteryPercent();
-			updateBatteryIndication();
-			updateBatteryPercentData();
+			
+			updateBatteryData();
 			batteryCounter = 0;
 		}
 		batteryCounter++;
+
+		if (_debugMode)
+		{
+			readSensorsDurationMax.battery = max(readSensorsDurationMax.battery, (uint32_t)(micros() - read1SensorBegin));
+			read1SensorBegin = micros();
+		}
 	}
 	
 	if (dummyIsrWithDelay)
@@ -2494,16 +3019,22 @@ void EmotiBit::readSensors()
 		if (acquireData.eda) {
 			static uint16_t edaCounter = timerLoopOffset.eda;
 			if (edaCounter == EDA_SAMPLING_DIV) {
-				int8_t tempStatus = updateEDAData();
+				int8_t tempStatus = emotibitEda.readData();
 				edaCounter = 0;
 			}
 			edaCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.eda = max(readSensorsDurationMax.eda, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
 		}
 
-		// Temperature / Humidity Sensor
+
 		if (chipBegun.SI7013 && acquireData.tempHumidity) {
 			static uint16_t temperatureCounter = timerLoopOffset.tempHumidity;
-			if (temperatureCounter == TEMPERATURE_SAMPLING_DIV) {
+			if (temperatureCounter == TEMPERATURE_0_SAMPLING_DIV) {
 				// Note: Temperature/humidity and the thermistor are alternately sampled 
 				// on every other call of updateTempHumidityData()
 				// I.e. you must call updateTempHumidityData() 2x with a sufficient measurement 
@@ -2515,7 +3046,32 @@ void EmotiBit::readSensors()
 				temperatureCounter = 0;
 			}
 			temperatureCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.tempHumidity = max(readSensorsDurationMax.tempHumidity, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
 		}
+
+		// EmotiBit bottom temp
+		if (chipBegun.MAX30101 && acquireData.tempPpg)
+		{
+			static uint16_t bottomTempCounter = timerLoopOffset.bottomTemp;
+			if (bottomTempCounter == TEMPERATURE_1_SAMPLING_DIV) {
+				// we can add a comditional someday, when we have more than one sensor providing bottom temp
+				int8_t tempStatus = updatePpgTempData();
+				bottomTempCounter = 0;
+			}
+			bottomTempCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.tempPpg = max(readSensorsDurationMax.tempPpg, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
+		}
+
 
 		// Thermopile
 		if (chipBegun.MLX90632 && acquireData.thermopile) {
@@ -2525,6 +3081,12 @@ void EmotiBit::readSensors()
 				thermopileCounter = 0;
 			}
 			thermopileCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.thermopile = max(readSensorsDurationMax.thermopile, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
 		}
 
 		// PPG
@@ -2535,6 +3097,12 @@ void EmotiBit::readSensors()
 				ppgCounter = 0;
 			}
 			ppgCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.ppg = max(readSensorsDurationMax.ppg, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
 		}
 
 		// IMU
@@ -2545,6 +3113,12 @@ void EmotiBit::readSensors()
 				imuCounter = 0;
 			}
 			imuCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.imu = max(readSensorsDurationMax.imu, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
 		}
 
 		// LED STATUS CHANGE SEGMENT
@@ -2555,63 +3129,260 @@ void EmotiBit::readSensors()
 			{
 				ledCounter = 0;
 
-				if (buttonPressed)
+				if (testingMode != TestingMode::FACTORY_TEST)
 				{
-					// Turn on the LEDs when the button is pressed
-					led.setLED(uint8_t(EmotiBit::Led::RED), true);
-					led.setLED(uint8_t(EmotiBit::Led::BLUE), true);
-					led.setLED(uint8_t(EmotiBit::Led::YELLOW), true);
-				}
-				else
-				{
-
-					// WiFi connected status LED
-					if (_emotiBitWiFi.isConnected())
+					if (buttonPressed)
 					{
+						// Turn on the LEDs when the button is pressed
+						led.setLED(uint8_t(EmotiBit::Led::RED), true);
 						led.setLED(uint8_t(EmotiBit::Led::BLUE), true);
-					}
-					else
-					{
-						led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
-					}
-
-					// Battery LED
-					if (battIndicationSeq)
-					{
 						led.setLED(uint8_t(EmotiBit::Led::YELLOW), true);
 					}
 					else
 					{
-						led.setLED(uint8_t(EmotiBit::Led::YELLOW), false);
-					}
-
-					// Recording status LED
-					if (_sdWrite)
-					{
-						static uint32_t recordBlinkDuration = millis();
-						if (millis() - recordBlinkDuration >= 500)
+						// WiFi connected status LED
+						if (_emotiBitWiFi.isConnected())
 						{
-							led.setLED(uint8_t(EmotiBit::Led::RED), !led.getLED(uint8_t(EmotiBit::Led::RED)));
-							recordBlinkDuration = millis();
+							// Connected to oscilloscope
+							// turn LED on
+							led.setLED(uint8_t(EmotiBit::Led::BLUE), true);
+						}
+						else
+						{
+							if (_emotiBitWiFi.status(false) == WL_CONNECTED) // ToDo: assess if WiFi.status() is thread/interrupt safe
+							{
+								// Not connected to oscilloscope, but connected to wifi
+								// blink LED
+								static unsigned long onTime = 125; // msec
+								static unsigned long totalTime = 500; // msec
+								static bool wifiConnectedBlinkState = false;
+
+								static unsigned long wifiConnBlinkTimer = millis();
+
+								unsigned long timeNow = millis();
+								if (timeNow - wifiConnBlinkTimer < onTime)
+								{
+									led.setLED(uint8_t(EmotiBit::Led::BLUE), true);
+								}
+								else if (timeNow - wifiConnBlinkTimer < totalTime)
+								{
+									led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
+								}
+								else
+								{
+									wifiConnBlinkTimer = timeNow;
+								}
+							}
+							else
+							{
+								// not connected to wifi
+								// turn LED off
+								led.setLED(uint8_t(EmotiBit::Led::BLUE), false);
+							}
+						}
+
+						// Battery LED
+						if (battIndicationSeq)
+						{
+							led.setLED(uint8_t(EmotiBit::Led::YELLOW), true);
+						}
+						else
+						{
+							led.setLED(uint8_t(EmotiBit::Led::YELLOW), false);
+						}
+
+						// Recording status LED
+						if (_sdWrite)
+						{
+							static uint32_t recordBlinkDuration = millis();
+							if (millis() - recordBlinkDuration >= 500)
+							{
+								led.setLED(uint8_t(EmotiBit::Led::RED), !led.getLED(uint8_t(EmotiBit::Led::RED)));
+								recordBlinkDuration = millis();
+							}
+						}
+						else if (!_sdWrite && led.getLED(uint8_t(EmotiBit::Led::RED)) == true)
+						{
+							led.setLED(uint8_t(EmotiBit::Led::RED), false);
 						}
 					}
-					else if (!_sdWrite && led.getLED(uint8_t(EmotiBit::Led::RED)) == true)
-					{
-						led.setLED(uint8_t(EmotiBit::Led::RED), false);
-					}
 				}
+				led.send();
 			}
 			ledCounter++;
+
+			if (_debugMode)
+			{
+				readSensorsDurationMax.led = max(readSensorsDurationMax.led, (uint32_t)(micros() - read1SensorBegin));
+				read1SensorBegin = micros();
+			}
 		}
 	}
-	
+
+	if (_debugMode)
+	{
+		readSensorsDurationMax.total = max(readSensorsDurationMax.total, (uint32_t)(micros() - readSensorsBegin));
+	}
 	if (acquireData.debug) pushData(EmotiBit::DataType::DEBUG, micros() - readSensorsBegin); // Add readSensors processing duration to debugBuffer
 
-	if (DIGITAL_WRITE_DEBUG) digitalWrite(10, LOW);
+	if (DIGITAL_WRITE_DEBUG) digitalWrite(DEBUG_OUT_PIN_0, LOW);
 }
 
+void EmotiBit::processHeartRate()
+{
+	float* data;
+	uint16_t dataSize;
+	uint32_t timestamp;
+	static uint16_t interBeatSampleCount = 0;
+	static uint8_t basisSignal = (uint8_t)DataType::PPG_INFRARED;
+	static DigitalFilter heartRateFilter(DigitalFilter::FilterType::IIR_LOWPASS, 25, 1);  // heartbeat is signal with a variable "sampling rate". We are choosing a hardcoded "sampling freq." of 25 to reduce noise.
+	static DigitalFilter ppgSensorHighpass(DigitalFilter::FilterType::IIR_HIGHPASS, _samplingRates.ppg, 1); // to remove respiration artifact. filter frequency selected empirically
+	const static size_t APERIODIC_DATA_LEN = 1;  //used in packet header
+	const static float timePeriod = (1.f / _samplingRates.ppg) * 1000; // in mS
+	float interBeatInterval = 0; // in mS
+	float heartRate; // in bpm
+	dataSize = dataDoubleBuffers[basisSignal]->getData(&data, &timestamp, false);
+	// uncomment to store intermediate data processing variables
+	/*
+	static float respIirFiltData[20]; // buffer to hold IIR filtered data (removed respiration)
+	static float iirFiltData[20]; // buffer to hold FIR filtered data (removed respiration)
+	for(uint8_t i=0;i<20;i++)
+ 	{
+		//respIirFiltData[i] = 0; // init buffer to 0 on every pass
+		iirFiltData[i] = 0;
+	} */
+	for (uint16_t i = 0; i < dataSize; i++)
+	{
+		// filter ppg data to remove respiration artifact
+		float filteredPpg = ppgSensorHighpass.filter(data[i]);
+		//respIirFiltData[i] = filteredPpg;
+		interBeatSampleCount++;
+		// the heart rate algorithm can be found in: EmotiBit_MAX30101/src/heartRate.cpp
+		int16_t tempIirFiltData = 0;
+		bool isBeat = checkForBeat(int32_t(filteredPpg), tempIirFiltData, true);
+		if (isBeat)
+		{
+			// beat detected
+			// calculate IBI
+			interBeatInterval = interBeatSampleCount * timePeriod; // in mS
+			// back calculate the time of beat occurance
+			uint32_t timeAdjustment = (dataSize - i - 1) * timePeriod; // in mS
+			uint32_t beatTime = timestamp - timeAdjustment; // mS
 
+			// calculate heart rate
+			heartRate = (60.f / interBeatInterval) * 1000; // beats per min
+			heartRate = heartRateFilter.filter(heartRate);
 
+			// Add packets to output
+			addPacket(beatTime, EmotiBitPacket::TypeTag::INTER_BEAT_INTERVAL, &interBeatInterval, APERIODIC_DATA_LEN);
+			addPacket(beatTime, EmotiBitPacket::TypeTag::HEART_RATE, &heartRate, APERIODIC_DATA_LEN);
+				
+			// reset interBeatCount
+			interBeatSampleCount = 0;
+		}
+		//iirFiltData[i] = (float)tempIirFiltData;
+	}
+	// uncomment to add intermediates to the output message
+	//const char* IIR_FILT_TYPETAG = "RM\0"; //respiration removed
+	//addPacket(timestamp, IIR_FILT_TYPETAG, respIirFiltData, dataSize, true);
+	//const char* FIR_FILT_DATA = "FF\0"; //fir filtered
+	//addPacket(timestamp, FIR_FILT_DATA, iirFiltData, dataSize, true);
+}
+
+void EmotiBit::processData()
+{
+	// Perform all derivative calculations
+	// Swap all buffers to that data is ready to send from OUT buffer
+
+	static bool overflowTestOn = false;
+#ifdef TEST_OVERFLOW
+	static unsigned long overflowTestTimer = millis();
+	static unsigned long overflowOnTime = 10000;
+	if (millis() - overflowTestTimer > overflowOnTime)
+	{
+		overflowTestOn = !overflowTestOn;
+		Serial.println("overflowTestOn = " + String(overflowTestOn));
+		overflowTestTimer = millis();
+	}
+#endif // TEST_OVERFLOW
+
+	if (!overflowTestOn)
+	{
+		for (int16_t t = 0; t < (uint8_t)EmotiBit::DataType::length; t++)
+		{
+			if ((uint8_t)EmotiBit::DataType::EDA == t)
+			{
+				// EDA is a prototype for a controller model going forward
+				// In the future, processData() functions will be added to a linked list for iteration
+				emotibitEda.processData();
+			}
+			else if ((uint8_t)EmotiBit::DataType::EDL == t)
+			{
+				// Do nothing, handled by EDA
+			}
+			else if ((uint8_t)EmotiBit::DataType::EDR == t)
+			{
+				// Do nothing, handled by EDA
+			}
+			else if ((uint8_t)EmotiBit::DataType::THERMOPILE == t)
+			{
+				processThermopileData();
+			}
+			else
+			{
+				dataDoubleBuffers[t]->swap();
+				//Serial.print(String(t) + ",");
+			}
+		}
+		if (acquireData.heartRate)
+		{
+			processHeartRate();
+		}
+		if (acquireData.edrMetrics)
+		{
+			// Note: this may move to emotiBitEda.processData() in the future
+			emotibitEda.processElectrodermalResponse(this);
+
+		}
+	}
+}
+
+void EmotiBit::sendData()
+{
+	for (int16_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+	{
+		addPacket((EmotiBit::DataType) i);
+		if (_outDataPackets.length() > OUT_MESSAGE_TARGET_SIZE)
+		{
+			// Avoid overrunning our reserve memory
+			//if (_outDataPackets.length() > 2000)
+			//{
+			//	Serial.println(_outDataPackets.length());
+			//}
+
+			if (getPowerMode() == PowerMode::NORMAL_POWER)
+			{
+				_emotiBitWiFi.sendData(_outDataPackets);
+			}
+			//Serial.println("_emotiBitWiFi.sendData()");
+			writeSdCardMessage(_outDataPackets);
+			//Serial.println("writeSdCardMessage()");
+			_outDataPackets = "";
+
+		}
+	}
+	if (_outDataPackets.length() > 0)
+	{
+		if (getPowerMode() == PowerMode::NORMAL_POWER)
+		{
+			_emotiBitWiFi.sendData(_outDataPackets);
+		}
+		writeSdCardMessage(_outDataPackets);
+		_outDataPackets = "";
+	}
+}
+
+#ifdef ADAFRUIT_FEATHER_M0
 #ifdef __arm__
 // should use uinstd.h to define sbrk but Due causes a conflict
 extern "C" char* sbrk(int incr);
@@ -2629,13 +3400,18 @@ int EmotiBit::freeMemory() {
 	return __brkval ? &top - __brkval : &top - __malloc_heap_start;
 #endif  // __arm__
 }
-
+#endif
 
 // NEW Hibernate
-void EmotiBit::hibernate(bool i2cSetupComplete) {
-	Serial.println("hibernate()");
+void EmotiBit::sleep(bool i2cSetupComplete) {
+	Serial.println("sleep()");
+#ifdef ARDUINO_FEATHER_ESP32
+	// for more information: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/system/sleep_modes.html#entering-deep-sleep
+	esp_deep_sleep_start();
+#else
 	Serial.println("Stopping timer...");
 	stopTimer();
+
 	// Delay to ensure the timer has finished
 	delay((1000 * 5) / BASE_SAMPLING_FREQ);
 	// if i2c sensor setup has been completed
@@ -2645,6 +3421,7 @@ void EmotiBit::hibernate(bool i2cSetupComplete) {
 		led.setLED(uint8_t(EmotiBit::Led::RED), true);
 		led.setLED(uint8_t(EmotiBit::Led::BLUE), true);
 		led.setLED(uint8_t(EmotiBit::Led::YELLOW), true);
+		led.send();
 		chipBegun.MAX30101 = false;
 		chipBegun.BMM150 = false;
 		chipBegun.BMI160 = false;
@@ -2657,10 +3434,10 @@ void EmotiBit::hibernate(bool i2cSetupComplete) {
 	Serial.println("Shutting down serial interfaces...");
 	SPI.end(); 
 	Wire.end();
-	_EmotiBit_i2c->end();
 
 	if (_EmotiBit_i2c != nullptr)
 	{
+		_EmotiBit_i2c->end();
 		delete(_EmotiBit_i2c);
 		_EmotiBit_i2c = nullptr;
 	}
@@ -2669,7 +3446,7 @@ void EmotiBit::hibernate(bool i2cSetupComplete) {
 	// Setup all pins (digital and analog) in INPUT mode (default is nothing)  
 	for (uint32_t ul = 0; ul < PINS_COUNT; ul++)
 	{
-		if (ul != _hibernatePin) {
+		if (ul != EmotiBitVersionController::HIBERNATE_PIN) {
 			pinMode(ul, OUTPUT);
 			digitalWrite(ul, LOW);
 			pinMode(ul, INPUT);
@@ -2679,12 +3456,20 @@ void EmotiBit::hibernate(bool i2cSetupComplete) {
 	}
 	// Turn off EmotiBit power
 	Serial.println("Disabling EmotiBit power");
-	pinMode(_hibernatePin, OUTPUT);
-	digitalWrite(_hibernatePin, _emotiBitSystemConstants[(int)SystemConstants::EMOTIBIT_HIBERNATE_LEVEL]);
+	pinMode(EmotiBitVersionController::HIBERNATE_PIN, OUTPUT);
+	digitalWrite(EmotiBitVersionController::HIBERNATE_PIN, _emotiBitSystemConstants[(int)SystemConstants::EMOTIBIT_HIBERNATE_LEVEL]);
 	delay(100);
-	pinMode(_hibernatePin, _emotiBitSystemConstants[(int)SystemConstants::EMOTIBIT_HIBERNATE_PIN_MODE]);	//deepSleep();
+	pinMode(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN, OUTPUT);
+	digitalWrite(EmotiBitVersionController::EMOTIBIT_I2C_CLK_PIN, LOW);
+	pinMode(EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN, OUTPUT);
+	digitalWrite(EmotiBitVersionController::EMOTIBIT_I2C_DAT_PIN, LOW);
+	Serial.println("DRVSTR HIGH");
+	PORT->Group[PORTA].PINCFG[17].bit.DRVSTR = 1; // SCL
+	PORT->Group[PORTA].PINCFG[16].bit.DRVSTR = 1; // SDA
+	pinMode(EmotiBitVersionController::HIBERNATE_PIN, _emotiBitSystemConstants[(int)SystemConstants::EMOTIBIT_HIBERNATE_PIN_MODE]);
 	Serial.println("Entering deep sleep...");
 	LowPower.deepSleep();
+#endif
 }
 
 // Loads the configuration from a file
@@ -2698,38 +3483,66 @@ bool EmotiBit::loadConfigFile(const String &filename) {
 		Serial.println(" not found");
 		return false;
 	}
-
-	Serial.print("Parsing: ");
-	Serial.println(filename);
-
+	
+	if (testingMode == TestingMode::ACUTE || testingMode == TestingMode::CHRONIC)
+	{
+		Serial.print("Parsing: ");
+		Serial.println(filename);
+	}
 	// Allocate the memory pool on the stack.
 	// Don't forget to change the capacity to match your JSON document.
 	// Use arduinojson.org/assistant to compute the capacity.
 	//StaticJsonBuffer<1024> jsonBuffer;
-	StaticJsonBuffer<1024> jsonBuffer;
+	StaticJsonDocument<1024> jsonDoc;
 
 	// Parse the root object
-	JsonObject &root = jsonBuffer.parseObject(file);
+	DeserializationError error = deserializeJson(jsonDoc, file);
 
-	if (!root.success()) {
+	if (error) {
 		Serial.println(F("Failed to parse config file"));
+		setupFailed("Failed to parse Config file contents");
 		return false;
 	}
 
 	size_t configSize;
 	// Copy values from the JsonObject to the Config
-	configSize = root.get<JsonVariant>("WifiCredentials").as<JsonArray>().size();
-	Serial.print("ConfigSize: ");
+	configSize = jsonDoc["WifiCredentials"].size(); 
+	Serial.print("Number of network credentials found in config file: ");
 	Serial.println(configSize);
 	for (size_t i = 0; i < configSize; i++) {
-		String ssid = root["WifiCredentials"][i]["ssid"] | "";
-		String pass = root["WifiCredentials"][i]["password"] | "";
+		String ssid = jsonDoc["WifiCredentials"][i]["ssid"] | "";  // See implementation example: https://arduinojson.org/v6/api/jsonvariant/or/
+		String userid = jsonDoc["WifiCredentials"][i]["userid"] | "";
+		String username = jsonDoc["WifiCredentials"][i]["username"] | "";
+		String pass = jsonDoc["WifiCredentials"][i]["password"] | "";
+
 		Serial.print("Adding SSID: ");
-		Serial.println(ssid);
-		_emotiBitWiFi.addCredential( ssid, pass);
-		Serial.println(ssid);
-		Serial.println(pass);
+		Serial.print(ssid);
+
+		if (!userid.equals(""))
+		{
+			Serial.print(" -userid:"); Serial.print(userid);
+			if (!username.equals(""))
+			{
+				Serial.print(" -username:"); Serial.print(username);
+			}
+		}
+		Serial.print(" -pass:" + pass);
+		
+		if (_emotiBitWiFi.addCredential(ssid, userid, username, pass) < 0)
+		{
+			// Number of credentials exceeded max allowed
+			Serial.println("...failed to add credential");
+			Serial.println("***Credential storage capacity exceeded***");
+			Serial.print("Ignoring credentials beginning: "); Serial.println(ssid);
+			break;
+		}
+		else
+		{
+			Serial.println(" ... success");
+		}
+
 	}
+	_emotiBitWiFi.setDeviceId(emotibitDeviceId);
 
 	//strlcpy(config.hostname,                   // <- destination
 	//	root["hostname"] | "example.com",  // <- source
@@ -2770,8 +3583,13 @@ bool EmotiBit::writeSdCardMessage(const String & s) {
 			if (millis() - syncTimer > targetFileSyncDelay)
 			{
 				syncTimer = millis();
-				_dataFile.sync();
+#ifdef ARDUINO_FEATHER_ESP32
+				_dataFile.flush();
+#else
+				_dataFile.sync(); // ToDo: Consider using flush() for all MCUs
+#endif
 			}
+
 		}
 		else {
 			Serial.print("Data file didn't open properly: ");
@@ -2779,6 +3597,8 @@ bool EmotiBit::writeSdCardMessage(const String & s) {
 			_sdWrite = false;
 		}
 	}
+	// ToDo: implement logic to determine return val
+	return true;
 }
 
 EmotiBit::PowerMode EmotiBit::getPowerMode()
@@ -2796,9 +3616,16 @@ void EmotiBit::setPowerMode(PowerMode mode)
 		Serial.println("PowerMode::NORMAL_POWER");
 		if (_emotiBitWiFi.isOff())
 		{
-			_emotiBitWiFi.begin(100, 100);	// ToDo: create a async begin option
+			unsigned long beginTime = millis();
+			_emotiBitWiFi.begin(100, 1, 100);	// This ToDo: create a async begin option
+			Serial.print("Total WiFi.begin() = ");
+			Serial.println(millis() - beginTime);
 		}
+#ifdef ADAFRUIT_FEATHER_M0
+		// For ADAFRUIT_FEATHER_M0, lowPowerMode() is a good balance of performance and battery
 		WiFi.lowPowerMode();
+		// For ESP32 the default WIFI_PS_MIN_MODEM is probably optimal https://www.mischianti.org/2021/03/06/esp32-practical-power-saving-manage-wifi-and-cpu-1/
+#endif
 		modePacketInterval = NORMAL_POWER_MODE_PACKET_INTERVAL;
 	}
 	else if (getPowerMode() == PowerMode::LOW_POWER)
@@ -2806,9 +3633,14 @@ void EmotiBit::setPowerMode(PowerMode mode)
 		Serial.println("PowerMode::LOW_POWER");
 		if (_emotiBitWiFi.isOff())
 		{
-			_emotiBitWiFi.begin(100, 100);	// ToDo: create a async begin option
+			unsigned long beginTime = millis();
+			_emotiBitWiFi.begin(100, 1, 100);	// This ToDo: create a async begin option
+			Serial.print("Total WiFi.begin() = ");
+			Serial.println(millis() - beginTime);
 		}
+#ifdef ADAFRUIT_FEATHER_M0
 		WiFi.lowPowerMode();
+#endif
 		modePacketInterval = LOW_POWER_MODE_PACKET_INTERVAL;
 	}
 	else if (getPowerMode() == PowerMode::MAX_LOW_POWER)
@@ -2816,9 +3648,15 @@ void EmotiBit::setPowerMode(PowerMode mode)
 		Serial.println("PowerMode::MAX_LOW_POWER");
 		if (_emotiBitWiFi.isOff())
 		{
-			_emotiBitWiFi.begin(100, 100);	// ToDo: create a async begin option
+			unsigned long beginTime = millis();
+			_emotiBitWiFi.begin(100, 1, 100);	// This ToDo: create a async begin option
+			Serial.print("Total WiFi.begin() = ");
+			Serial.println(millis() - beginTime);
 		}
+#ifdef ADAFRUIT_FEATHER_M0
 		WiFi.maxLowPowerMode();
+#endif
+		// ToDo: for ESP32 There may be some value to explore WIFI_PS_MAX_MODEM https://www.mischianti.org/2021/03/06/esp32-practical-power-saving-manage-wifi-and-cpu-1/
 		modePacketInterval = LOW_POWER_MODE_PACKET_INTERVAL;
 	}
 	else if (getPowerMode() == PowerMode::WIRELESS_OFF)
@@ -2847,7 +3685,7 @@ void EmotiBit::writeSerialData(EmotiBit::DataType t)
 		//Serial.print(", ");
 		//Serial.print(dataAvailable);
 		//Serial.print(", ");
-		Serial.println(String(data[i], printLen[(uint8_t)t]));
+		Serial.println(String(data[i], int(_printLen[(uint8_t)t])));
 	}
 }
 
@@ -2909,12 +3747,12 @@ size_t EmotiBit::readData(EmotiBit::DataType t, float **data, uint32_t &timestam
 	return 0;
 }
 
-void EmotiBit::updateBatteryIndication()
+void EmotiBit::updateBatteryIndication(float battPercent)
 {
 	if (battIndicationSeq)
 	{
 		// Low Batt Indication is ON
-		if (battLevel > uint8_t(EmotiBit::BattLevel::THRESHOLD_HIGH))
+		if (battPercent > uint8_t(EmotiBit::BattLevel::THRESHOLD_HIGH))
 		{
 			// Wait until we hit he high threshold to avoid flickering
 			battIndicationSeq = 0;
@@ -2923,28 +3761,11 @@ void EmotiBit::updateBatteryIndication()
 	else
 	{
 		// Low Batt Indication is OFF
-		if (battLevel < uint8_t(EmotiBit::BattLevel::THRESHOLD_LOW))
+		if (battPercent < uint8_t(EmotiBit::BattLevel::THRESHOLD_LOW))
 		{
 			battIndicationSeq = 1;
 		}
 	}
-
-
-	//// To update Battery level variable for LED indication
-	//if (battLevel > uint8_t(EmotiBit::BattLevel::THRESHOLD_HIGH))
-	//	battIndicationSeq = 0;
-	//else if (battLevel < uint8_t(EmotiBit::BattLevel::THRESHOLD_HIGH) && battLevel > uint8_t(EmotiBit::BattLevel::THRESHOLD_MED)) {
-	//	battIndicationSeq = uint8_t(EmotiBit::BattLevel::INDICATION_SEQ_HIGH);
-	//	BattLedDuration = 1000;
-	//}
-	//else if (battLevel < uint8_t(EmotiBit::BattLevel::THRESHOLD_MED) && battLevel > uint8_t(EmotiBit::BattLevel::THRESHOLD_LOW)) {
-	//	battIndicationSeq = uint8_t(EmotiBit::BattLevel::INDICATION_SEQ_MED);
-	//	BattLedDuration = 500;
-	//}
-	//else if (battLevel < uint8_t(EmotiBit::BattLevel::THRESHOLD_LOW)) {
-	//	battIndicationSeq = uint8_t(EmotiBit::BattLevel::INDICATION_SEQ_LOW);
-	//	BattLedDuration = 1;
-	//}
 }
 
 void EmotiBit::appendTestData(String &dataMessage, uint16_t &packetNumber)
@@ -2961,7 +3782,7 @@ void EmotiBit::appendTestData(String &dataMessage, uint16_t &packetNumber)
 			{
 				if (i > 0 || j > 0)
 				{
-					payload += ",";
+					payload += EmotiBitPacket::PAYLOAD_DELIMITER;
 				}
 				k = i * 250 / m + random(50);
 				payload += k;
@@ -3050,23 +3871,30 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println("Press T to togle ON the Thermopile");
 			Serial.println("Press e to togle OFF the GSR");
 			Serial.println("Press E to togle ON the GSR");
-			Serial.println("Press h to togle OFF the Temp/Humidity Sensor");
-			Serial.println("Press H to togle ON the Temp/Humidity Sensor");
+			Serial.println("Press 0 to togle OFF the Temp0 Sensor");
+			Serial.println("Press ) to togle ON the Temp0 Sensor");
+			Serial.println("Press 1 to togle OFF the Temp1 Sensor");
+			Serial.println("Press ! to togle ON the Temp1 Sensor");
 			Serial.println("Press i to toggle OFF the IMU");
 			Serial.println("Press I to toggle ON the IMU");
 			Serial.println("Press p to toggle OFF the PPG sensor");
 			Serial.println("Press P to toggle ON the PPG sensor");
-			Serial.println("Press d to toggle OFF recording ISR loop time");
-			Serial.println("Press D to toggle ON recording ISR loop time");
 			Serial.println("Press b to toggle OFF Battry update");
 			Serial.println("Press B to toggle ON Battery update");
+			Serial.println("Press - to toggle OFF ALL sensor reads");
+			Serial.println("Press _ to toggle ON ALL sensor reads");
 			Serial.println("Press a to toggle OFF ADC correction");
 			Serial.println("Press A to toggle ON ADC correction");
+			Serial.println("Press d to toggle OFF recording ISR loop time");
+			Serial.println("Press D to toggle ON recording ISR loop time");
+			Serial.println("Press o to start bufferOverflowTest");
 			Serial.println("Press f to print the FW version");
 			Serial.println("press | to enable Digital filters");
-			Serial.println("Press - to disable Digital filters");
-			//Serial.println("Press 0 to simulate nan events in the thermopile");
-
+			Serial.println("Press \\ to disable Digital filters");
+			Serial.println("Press s to print maxReadSensors metrics");
+			Serial.println("Press S to reset maxReadSensors metrics");
+			Serial.println("[ACUTE TESTING MODE] Press n to printEntireNvm");
+			Serial.println("[ACUTE TESTING MODE] Press N to eraseEeprom");
 		}
 		else if (c == ':')
 		{
@@ -3093,6 +3921,7 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 		}
+#ifdef ADAFRUIT_FEATHER_M0
 		else if (c == 'R')
 		{
 			payload = "Free RAM: ";
@@ -3101,6 +3930,7 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 		}
+#endif
 		else if (c == 'r')
 		{
 			const int nFloats = 25;
@@ -3112,8 +3942,10 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 			float * data = new float[nFloats];
+#ifdef ADAFRUIT_FEATHER_M0
 			payload = "Free RAM: ";
 			payload += String(freeMemory(), DEC);
+#endif
 			payload += " bytes";
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
@@ -3168,7 +4000,7 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 			if (_serialData != DataType::length) _serialData = DataType::EDA;
 		}
-		else if (c == 'h')
+		else if (c == '0')
 		{
 			acquireData.tempHumidity = false;
 			payload = "acquireData.tempHumidity = ";
@@ -3176,14 +4008,31 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 		}
-		else if (c == 'H')
+		else if (c == ')')
 		{
 			acquireData.tempHumidity = true;
 			payload = "acquireData.tempHumidity = ";
 			payload += acquireData.tempHumidity;
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
-			if (_serialData != DataType::length) _serialData = DataType::HUMIDITY_0;
+			if (_serialData != DataType::length) _serialData = DataType::TEMPERATURE_0;
+		}
+		else if (c == '1')
+		{
+		acquireData.tempPpg = false;
+		payload = "acquireData.tempPpg = ";
+		payload += acquireData.tempPpg;
+		Serial.println(payload);
+		debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
+		}
+		else if (c == '!')
+		{
+		acquireData.tempPpg = true;
+		payload = "acquireData.tempPpg = ";
+		payload += acquireData.tempPpg;
+		Serial.println(payload);
+		debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
+		if (_serialData != DataType::length) _serialData = DataType::TEMPERATURE_1;
 		}
 		else if (c == 'i')
 		{
@@ -3229,12 +4078,16 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 		}
 		else if (c == 'D')
 		{
+#ifdef DEBUG_BUFFER
 			acquireData.debug = true;
 			payload = "acquireData.debug = ";
 			payload += acquireData.debug;
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 			if (_serialData != DataType::length) _serialData = DataType::DEBUG;
+#else
+		Serial.print("DEBUG_BUFFER must be defined to set acquireData.debug = true");
+#endif
 		}
 		else if (c == 'b')
 		{
@@ -3253,6 +4106,35 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 			if (_serialData != DataType::length) _serialData = DataType::BATTERY_PERCENT;
 		}
+		else if (c == '-')
+		{
+		chipBegun.NCP5623 = false;
+		acquireData.eda = false;
+		acquireData.tempHumidity = false;
+		acquireData.thermopile = false;
+		acquireData.imu = false;
+		acquireData.ppg = false;
+		acquireData.tempPpg = false;
+		acquireData.battery = false;
+		payload = "ALL sensor reads OFF";
+		Serial.println(payload);
+		debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
+		}
+		else if (c == '_')
+		{
+		chipBegun.NCP5623 = true;
+		acquireData.eda = true;
+		acquireData.tempHumidity = true;
+		acquireData.thermopile = true;
+		acquireData.imu = true;
+		acquireData.ppg = true;
+		acquireData.tempPpg = true;
+		acquireData.battery = true;
+		payload = "ALL sensor reads ON";
+		Serial.println(payload);
+		debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
+		if (_serialData != DataType::length) _serialData = DataType::length;
+		}
 		/*else if (c == '0')
 		{
 			catchDataException.catchNan = !catchDataException.catchNan;
@@ -3261,6 +4143,7 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println(payload);
 			debugPackets += EmotiBitPacket::createPacket(EmotiBitPacket::TypeTag::EMOTIBIT_DEBUG, packetNumber++, payload, dataCount);
 		}*/
+#ifdef ADAFRUIT_FEATHER_M0
 		else if (c == 'a')
 		{
 			Serial.println("ADC correction disabled");
@@ -3271,10 +4154,18 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			Serial.println("ADC Correction Enabled");
 			ADC->CTRLB.bit.CORREN = 1;
 		}
+#endif
+		else if (c == 'o')
+		{
+			Serial.println("Starting bufferOverflowTest");
+			startBufferOverflowTest = true;
+		}
 		else if (c == 'f')
 		{
 			Serial.print("Firmware version: ");
 			Serial.println(firmware_version);
+			Serial.print("firmware_variant: ");
+			Serial.println(firmware_variant);
 		}
 		else if (c == '|')
 		{
@@ -3284,7 +4175,7 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			_enableDigitalFilter.mz = true;
 			_enableDigitalFilter.eda = true;
 		}
-		else if (c == '-')
+		else if (c == '\\')
 		{
 			Serial.println("disabling filter(s)");
 			_enableDigitalFilter.mx = false;
@@ -3292,9 +4183,151 @@ void EmotiBit::processDebugInputs(String &debugPackets, uint16_t &packetNumber)
 			_enableDigitalFilter.mz = false;
 			_enableDigitalFilter.eda = false;
 		}
+		else if (c == 's')
+		{
+			Serial.print("readSensorsIntervalMin = ");
+			Serial.println(readSensorsIntervalMin);
+			Serial.print("readSensorsIntervalMax = ");
+			Serial.println(readSensorsIntervalMax);
+			Serial.println("readSensorsDurationMax:");
+			Serial.print("  total = ");
+			Serial.println(readSensorsDurationMax.total);
+			Serial.print("    led = ");
+			Serial.println(readSensorsDurationMax.led);
+			Serial.print("    eda = ");
+			Serial.println(readSensorsDurationMax.eda);
+			Serial.print("    ppg = ");
+			Serial.println(readSensorsDurationMax.ppg);
+			Serial.print("tempPpg = ");
+			Serial.println(readSensorsDurationMax.tempPpg);
+			Serial.print("tempHum = ");
+			Serial.println(readSensorsDurationMax.tempHumidity);
+			Serial.print("  therm = ");
+			Serial.println(readSensorsDurationMax.thermopile);
+			Serial.print("    imu = ");
+			Serial.println(readSensorsDurationMax.imu);
+			Serial.print("battery = ");
+			Serial.println(readSensorsDurationMax.battery);
+			Serial.print("    nvm = ");
+			Serial.println(readSensorsDurationMax.nvm);
+		} 
+		else if (c == 'S')
+		{
+			Serial.print("Resetting maxReadSensorsTime");
+			readSensorsIntervalMin = 1000000;
+			readSensorsIntervalMax = 0;
+			readSensorsDurationMax.total = 0;
+			readSensorsDurationMax.led = 0;
+			readSensorsDurationMax.eda = 0;
+			readSensorsDurationMax.ppg = 0;
+			readSensorsDurationMax.tempPpg = 0;
+			readSensorsDurationMax.tempHumidity = 0;
+			readSensorsDurationMax.thermopile = 0;
+			readSensorsDurationMax.imu = 0;
+			readSensorsDurationMax.battery = 0;
+			readSensorsDurationMax.nvm = 0;
+		}
+		else if (c == 'n') 
+		{
+			if (testingMode == TestingMode::ACUTE)
+			{
+				_emotibitNvmController.printEntireNvm();
+			}
+		}
+		else if (c == 'N')
+		{
+			if (testingMode == TestingMode::ACUTE)
+			{
+				_emotibitNvmController.eraseEeprom();
+			}
+		}
 	}
 }
 
+void EmotiBit::processFactoryTestMessages() 
+{
+	if (Serial.available() > 0 && Serial.read() == EmotiBitFactoryTest::MSG_START_CHAR)
+	{
+		Serial.print("FactoryTestMessage: ");
+		String msg = Serial.readStringUntil(EmotiBitFactoryTest::MSG_TERM_CHAR);
+		String msgTypeTag = msg.substring(0, 2);
+		Serial.println(msgTypeTag);
+		if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::LED_RED_ON))
+		{
+			led.setLED((uint8_t)EmotiBit::Led::RED, true);
+		}
+		else if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::LED_RED_OFF))
+		{
+			led.setLED((uint8_t)EmotiBit::Led::RED, false);
+		}
+		else if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::LED_BLUE_ON))
+		{
+			led.setLED((uint8_t)EmotiBit::Led::BLUE, true);
+		}
+		else if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::LED_BLUE_OFF))
+		{
+			led.setLED((uint8_t)EmotiBit::Led::BLUE, false);
+		}
+		else if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::LED_YELLOW_ON))
+		{
+			led.setLED((uint8_t)EmotiBit::Led::YELLOW, true);
+		}
+		else if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::LED_YELLOW_OFF))
+		{
+			led.setLED((uint8_t)EmotiBit::Led::YELLOW, false);
+		}
+		else if (msgTypeTag.equals(EmotiBitPacket::TypeTag::MODE_HIBERNATE))
+		{
+			sleep();
+		}
+		else if (msgTypeTag.equals(EmotiBitPacket::TypeTag::SERIAL_DATA_ON))
+		{
+			String dataType;
+			EmotiBitPacket::getPacketElement(msg, dataType, 3);
+			for (uint8_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+			{
+				if (dataType.equals(typeTags[i]))
+				{
+					_sendSerialData[i] = true;
+					Serial.print("SERIAL_DATA_ON: ");
+					Serial.println(typeTags[i]);
+				}
+			}
+		}
+		else if (msgTypeTag.equals(EmotiBitPacket::TypeTag::SERIAL_DATA_OFF))
+		{
+			String dataType;
+			EmotiBitPacket::getPacketElement(msg, dataType, 3);
+			for (uint8_t i = 0; i < (uint8_t)EmotiBit::DataType::length; i++)
+			{
+				if (dataType.equals(typeTags[i]))
+				{
+					_sendSerialData[i] = false;
+					Serial.print("SERIAL_DATA_OFF: ");
+					Serial.println(typeTags[i]);
+				}
+			}
+		}
+		else if (msgTypeTag.equals(EmotiBitFactoryTest::TypeTag::EDA_CALIBRATION_VALUES))
+		{
+			Serial.println(msg);
+			if (emotibitEda.stageCalibStorage(&_emotibitNvmController, msg))
+			{
+				Serial.println("Loading Calibrated Values.");
+				if (emotibitEda.stageCalibLoad(&_emotibitNvmController))
+				{
+					EmotiBitFactoryTest::sendMessage(EmotiBitFactoryTest::TypeTag::EDA_CALIBRATION_ACK);
+				}
+			}
+		}
+		else {
+			Serial.print("Unrecognized Serial Command: ");
+			Serial.println(msg);
+		}
+	}
+}
+
+#ifdef ADAFRUIT_FEATHER_M0
 void EmotiBit::setTimerFrequency(int frequencyHz) {
 	int compareValue = (CPU_HZ / (TIMER_PRESCALER_DIV * frequencyHz)) - 1;
 	TcCount16* TC = (TcCount16*)TC3;
@@ -3370,11 +4403,36 @@ void attachToInterruptTC3(void(*readFunction)(void), EmotiBit* e)
 	onInterruptCallback = readFunction;
 }
 
+#elif defined ARDUINO_FEATHER_ESP32
+void onTimer() {
+	vTaskResume(EmotiBitDataAcquisition);
+}
+#endif
+
+#ifdef ARDUINO_FEATHER_ESP32
+
+void attachToCore(void(*readFunction)(void*), EmotiBit*e)
+{
+	attachEmotiBit(e);
+	// assigning readSensors to second core
+	xTaskCreatePinnedToCore(
+		*readFunction,   /* Task function. */
+		"EmotiBitDataAcquisition",     /* name of task. */
+		10000,       /* Stack size of task */
+		NULL,        /* parameter of the task */
+		configMAX_PRIORITIES - 1,           /* priority of the task */
+		&EmotiBitDataAcquisition,      /* Task handle to keep track of created task */
+		1);          /* pin task to core 0 */
+	delay(500);
+}
+
+#endif
+
 void attachEmotiBit(EmotiBit*e)
 {
 	myEmotiBit = e;
 }
-
+#ifdef ADAFRUIT_FEATHER_M0
 void ReadSensors()
 {
 	if (myEmotiBit != nullptr)
@@ -3382,4 +4440,149 @@ void ReadSensors()
 		myEmotiBit->readSensors();
 
 	}
+}
+#elif defined ARDUINO_FEATHER_ESP32
+void ReadSensors(void *pvParameters)
+{
+	Serial.print("The data acquisition is executing on core: "); Serial.println(xPortGetCoreID());
+	while (1) // the function assigned to the second core should never return
+	{
+		if (myEmotiBit != nullptr)
+		{
+			myEmotiBit->readSensors();
+
+		}
+		else
+		{
+			Serial.println("EmotiBit is nullptr");
+		}
+		vTaskSuspend(NULL);
+	}
+
+}
+#endif
+
+String EmotiBit::getFeatherMacAddress()
+{
+	const uint8_t len = 6;
+	String out;
+	out.reserve(len * 5 + 1); // ToDo: Assess if capacity requires space for \0
+	uint8_t mac[len];
+	WiFi.macAddress(mac);
+	for (uint8_t i = len; i > 0; i--)
+	{
+		//Serial.println(mac[i - 1]);
+		if (mac[i - 1] < 16)
+		{
+			out += "0";
+		}
+		out += String(mac[i - 1], HEX);
+		if (i > 1)
+		{
+			out += ":";
+		}
+	}
+	return out;
+}
+
+void EmotiBit::bufferOverflowTest(unsigned int maxTestDuration, unsigned int delayInterval, bool humanReadable)
+{
+	unsigned long startTime = millis();
+	unsigned int totalDuration = millis() - startTime;
+	unsigned int timeFirstOverflow = 0;
+
+	Serial.println("Results format:");
+	Serial.print("totalDuration");
+	humanReadable ? Serial.println("") : Serial.print(", ");
+	Serial.println("TypeTag, size, capacity, overflowCount");
+
+	while (totalDuration < maxTestDuration)
+	{
+		Serial.print(totalDuration);
+		humanReadable ? Serial.println("") : Serial.print(", ");
+
+		for (uint8_t d = 0; d < (uint8_t) DataType::length; d++)
+		{
+			Serial.print(typeTags[(uint8_t)d]);
+			Serial.print(", ");
+			Serial.print(dataDoubleBuffers[(uint8_t)d]->size(DoubleBufferFloat::BufferSelector::IN));
+			Serial.print(", ");
+			Serial.print(dataDoubleBuffers[(uint8_t)d]->capacity(DoubleBufferFloat::BufferSelector::IN));
+			Serial.print(", ");
+			Serial.print(dataDoubleBuffers[(uint8_t)d]->getOverflowCount(DoubleBufferFloat::BufferSelector::IN));
+			// if an overflow is detected on any stream, record the time of overflow
+			if(timeFirstOverflow == 0 && dataDoubleBuffers[(uint8_t)d]->getOverflowCount(DoubleBufferFloat::BufferSelector::IN))
+				timeFirstOverflow = totalDuration;
+
+			humanReadable ? Serial.println("") : Serial.print(", ");
+		}
+		Serial.println("");
+		delay(delayInterval);
+		totalDuration = millis() - startTime;
+	}
+	Serial.print("~Time @first overflow: "); Serial.println(timeFirstOverflow);
+}
+
+void EmotiBit::printEmotiBitInfo()
+{
+	Serial.println("[{\"info\":{");
+			
+	Serial.print("\"source_id\":\"");
+	Serial.print(_sourceId);
+	Serial.println("\",");
+
+	Serial.print("\"hardware_version\":\"");
+	Serial.print(EmotiBitVersionController::getHardwareVersion(_hwVersion));
+	Serial.println("\",");
+
+	Serial.print("\"sku\":\"");
+	Serial.print(emotiBitSku);
+	Serial.println("\",");
+
+	Serial.print("\"device_id\":\"");
+	Serial.print(emotibitDeviceId);
+	Serial.println("\",");
+
+	Serial.print("\"feather_version\":\"");
+	Serial.print(_featherVersion);
+	Serial.println("\",");
+
+	Serial.print("\"feather_wifi_mac_addr\":\"");
+	Serial.print(getFeatherMacAddress());
+	Serial.println("\",");
+
+	Serial.print("\"firmware_version\":\"");
+	Serial.print(firmware_version);
+	Serial.println("\",");
+  
+  Serial.print("\"firmware_variant\":\"");
+	Serial.print(firmware_variant);
+	Serial.println("\",");
+
+#ifdef ADAFRUIT_FEATHER_M0
+	Serial.print("\"free_memory\":\"");
+	Serial.print(String(freeMemory(), DEC));
+	Serial.println("\",");
+#endif
+
+  if (_emotiBitWiFi.status() == WL_CONNECTED)
+  {
+    IPAddress ip = WiFi.localIP();
+    Serial.print("\"ip_address\":\"");
+    Serial.print(ip);
+    Serial.println("\"");
+  }
+  
+	Serial.println("}}]");
+}
+
+void EmotiBit::restartMcu()
+{
+	Serial.println("Restarting MCU");
+	delay(1000);
+#ifdef ARDUINO_FEATHER_ESP32
+	ESP.restart();
+#elif defined ADAFRUIT_FEATHER_M0
+	NVIC_SystemReset();
+#endif
 }
