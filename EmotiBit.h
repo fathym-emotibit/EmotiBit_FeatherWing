@@ -1,4 +1,8 @@
-//#define DEBUG
+//#define DEBUG_FEAT_EDA_CTRL
+//#define DEBUG_THERM_PROCESS
+//#define DEBUG_THERM_UPDATE
+//#define DEBUG_BUFFER
+//#define TEST_OVERFLOW
 
 #ifndef _EMOTIBIT_H_
 #define _EMOTIBIT_H_
@@ -12,17 +16,25 @@
 #include <SparkFun_MLX90632_Arduino_Library.h>
 #include "DoubleBufferFloat.h"
 #include <ArduinoJson.h>
-#include "wiring_private.h"
 #include "EmotiBitWiFi.h"
 #include <SPI.h>
+#ifdef ARDUINO_FEATHER_ESP32
+#include <SD.h>
+#include "driver/adc.h"
+#include <esp_bt.h>
+#else
 #include <SdFat.h>
-#include <ArduinoJson.h>
 #include <ArduinoLowPower.h>
+#include "wiring_private.h"
+#endif
 #include "AdcCorrection.h"
-#include "EdaCorrection.h"
 #include "EmotiBitVersionController.h"
 #include "DigitalFilter.h"
-
+#include "EmotiBitFactoryTest.h"
+#include "EmotiBitEda.h"
+#include "EmotiBitVariants.h"
+#include "EmotiBitNvmController.h"
+#include "heartRate.h"
 
 class EmotiBit {
   
@@ -32,18 +44,48 @@ public:
 		NONE,
 		CHRONIC,
 		ACUTE,
-		ISR_CORRECTION_UPDATE,
-		ISR_CORRECTION_TEST,
+		FACTORY_TEST,
 		length
 	};
 
-	String firmware_version = "1.2.78";
+
+
+  String firmware_version = "1.9.0";
+
+
+
 	TestingMode testingMode = TestingMode::NONE;
 	const bool DIGITAL_WRITE_DEBUG = false;
+#if defined (ARDUINO_FEATHER_ESP32)
+	const uint8_t DEBUG_OUT_PIN_0 = 26;
+	const uint8_t DEBUG_OUT_PIN_1 = 33;
+	const uint8_t DEBUG_OUT_PIN_2 = 15;
+#elif defined (ADAFRUIT_FEATHER_M0)
+	const uint8_t DEBUG_OUT_PIN_0 = 14;
+	const uint8_t DEBUG_OUT_PIN_1 = 10;
+	const uint8_t DEBUG_OUT_PIN_2 = 9;
+#endif
+
+	const bool DC_DO_V2 = true;
 
 	bool _debugMode = false;
 	bool dummyIsrWithDelay = false;
 	uint32_t targetFileSyncDelay = 1;
+	struct ReadSensorsDurationMax
+	{
+		uint32_t total = 0;
+		uint32_t led = 0;
+		uint32_t eda = 0;
+		uint32_t ppg = 0;
+		uint32_t tempPpg = 0;
+		uint32_t tempHumidity = 0;
+		uint32_t thermopile = 0;
+		uint32_t imu = 0;
+		uint32_t battery = 0;
+		uint32_t nvm = 0;
+	} readSensorsDurationMax;
+	uint32_t readSensorsIntervalMin = 1000000;
+	uint32_t readSensorsIntervalMax = 0;
 
 
 	enum class SensorTimer {
@@ -75,6 +117,7 @@ public:
 	//};
 	struct DeviceAddress {
 		uint8_t MLX = 0x3A;
+		uint8_t EEPROM_FLASH_34AA02 = 0x50; // 7 bit address
 	};
 	struct BMM150TrimData {
 		int8_t dig_x1;
@@ -90,6 +133,16 @@ public:
 		uint16_t dig_xyz1;
 	};
   
+#if defined(EMOTIBIT_PPG_100HZ)
+	struct PPGSettings {
+		uint8_t ledPowerLevel = 0x2F; //Options: 0=Off to 255=50mA
+		uint16_t sampleAverage = 8;   //Options: 1, 2, 4, 8, 16, 32
+		uint8_t ledMode = 3;          //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green
+		uint16_t sampleRate = 800;    //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
+		uint16_t pulseWidth = 118;     //Options: 69, 118, 215, 411
+		uint16_t adcRange = 4096;     //Options: 2048, 4096, 8192, 16384
+	};
+#else
 	struct PPGSettings {
 		uint8_t ledPowerLevel = 0x2F; //Options: 0=Off to 255=50mA
 		uint16_t sampleAverage = 16;   //Options: 1, 2, 4, 8, 16, 32
@@ -98,6 +151,7 @@ public:
 		uint16_t pulseWidth = 215;     //Options: 69, 118, 215, 411
 		uint16_t adcRange = 4096;     //Options: 2048, 4096, 8192, 16384
 	};
+#endif
 
 	struct IMUSettings {
 		uint8_t acc_odr = BMI160AccelRate::BMI160_ACCEL_RATE_25HZ;
@@ -110,9 +164,9 @@ public:
 	};
 	
 	struct EnableDigitalFilter {
-		bool mx = true;
-		bool my = true;
-		bool mz = true;
+		bool mx = false;
+		bool my = false;
+		bool mz = false;
 		bool eda = true;
 	};
 
@@ -123,6 +177,7 @@ public:
 		float magnetometer = 0.f;
 		float humidity = 0.f;
 		float temperature = 0.f;
+		float temperature_1 = 0.f;
 		float thermopile = 0.f;
 		float ppg = 0.f;
 	};
@@ -131,6 +186,7 @@ public:
 		uint8_t eda = 1;
 		uint8_t humidity = 1;
 		uint8_t temperature = 1;
+		uint8_t temperature_1 = 1;
 		uint8_t thermopile = 1;
 		uint8_t battery = 1;
 	};
@@ -139,7 +195,8 @@ public:
 		NONE = 0,
 		BUFFER_OVERFLOW = -1,
 		DATA_CLIPPING = -2,
-		INDEX_OUT_OF_BOUNDS = -4
+		INDEX_OUT_OF_BOUNDS = -4,
+		SENSOR_NOT_READY = -8
 	};
 
   enum class DataType{
@@ -152,6 +209,7 @@ public:
 		EDL,
 		EDR,
 		TEMPERATURE_0,
+		TEMPERATURE_1,
 		THERMOPILE,
 		HUMIDITY_0,
 		ACCELEROMETER_X,
@@ -220,61 +278,67 @@ public:
 	MAX30105 ppgSensor;
 	NCP5623 led;
 	MLX90632 thermopile;
-	EdaCorrection *edaCorrection = nullptr;
+	EmotiBitEda emotibitEda;
+	EmotiBitNvmController _emotibitNvmController;
 
-	int _emotiBitSystemConstants[(int)SystemConstants::COUNT];
-
-	float edrAmplification;
-	float vRef1; // Reference voltage of first voltage divider(15/100)
-	float vRef2; // Reference voltage from second voltage divider(100/100)
-	//float rSkinAmp;
+	int _emotiBitSystemConstants[(int)SystemConstants::length];
 	float adcRes;
-	float edaVDivR;
-	float edaFeedbackAmpR;
-	float edaCrossoverFilterFreq;
-	uint8_t _sdCardChipSelectPin;	// ToDo: create getter and make private
 	BMM150TrimData bmm150TrimData;
 	bool bmm150XYClipped = false;
 	bool bmm150ZHallClipped = false;
-	uint8_t _hibernatePin;
 	bool thermopileBegun = false;
 	int thermopileFs = 8; // *** NOTE *** changing this may wear out the Melexis flash
 	uint8_t thermopileMode = MODE_STEP;		// If changing to MODE_CONTINUOUS besure to adjust SAMPLING_DIV to match thermopile rate
+	volatile unsigned long int _thermReadFinishedTime;
 
 	// ---------- BEGIN ino refactoring --------------
 	static const uint16_t OUT_MESSAGE_RESERVE_SIZE = 2048;
-	static const uint16_t OUT_PACKET_MAX_SIZE = 1024;
+	static const uint16_t OUT_MESSAGE_TARGET_SIZE = 1024;
 	static const uint16_t DATA_SEND_INTERVAL = 100;
 	static const uint16_t MAX_SD_WRITE_LEN = 512; // 512 is the size of the sdFat buffer
-	static const uint16_t MAX_DATA_BUFFER_SIZE = 32;
+	static const uint16_t MAX_DATA_BUFFER_SIZE = 48;
 	static const uint16_t NORMAL_POWER_MODE_PACKET_INTERVAL = 200;
 	static const uint16_t LOW_POWER_MODE_PACKET_INTERVAL = 1000;
 	uint16_t modePacketInterval = NORMAL_POWER_MODE_PACKET_INTERVAL;
 
 	// Timer constants
 #define TIMER_PRESCALER_DIV 1024
-	const uint32_t CPU_HZ = 48000000;
-
+#if defined(ARDUINO_FEATHER_ESP32)
+	const uint32_t CPU_HZ = 80000000; // 80MHz has been tested working to save battery life
+#elif defined(ADAFRUIT_FEATHER_M0)
+	const uint32_t CPU_HZ = 48000000; // In Hz
+#endif
+	
+	
+	/*
+	* Dev notes on understanding sampling rates
+	* If a sampling rate can be set for a sensor, it is done so in the sensor settigns.
+	* The Firmware reads data from the sensor @BASE_SAMPLING_FREQ/{SENSOR}_SAMPLING_DIV Hz
+	* further, the recorded samples may be avaraged, as set by EmotiBit::SamplesAveraged struct.
+	* So, net, the sampling rate of the data channel is BASE_SAMPLING_FREQ/{DATATYPE}_SAMPLING_DIV/SamplesAveraged.{DATATYPE}
+	*/ 
 	// ToDo: Make sampling variables changeable
-#define BASE_SAMPLING_FREQ 300
-#define EDA_SAMPLING_DIV 1
-#define IMU_SAMPLING_DIV 5
-#define PPG_SAMPLING_DIV 5
-#define LED_REFRESH_DIV 20
-#define THERMOPILE_SAMPLING_DIV 40 	// TODO: This should change according to the rate set on the thermopile begin function 
-#define TEMPERATURE_SAMPLING_DIV 10
+#define BASE_SAMPLING_FREQ 150
+#define LED_REFRESH_DIV 10
+#define EDA_SAMPLING_DIV 2
+#define PPG_SAMPLING_DIV 2
+#define TEMPERATURE_1_SAMPLING_DIV 20
+#define TEMPERATURE_0_SAMPLING_DIV 10
+#define THERMOPILE_SAMPLING_DIV 20 	// TODO: This should change according to the rate set on the thermopile begin function 
+#define IMU_SAMPLING_DIV 2
 #define BATTERY_SAMPLING_DIV 50
-#define DUMMY_ISR_DIV 20
+#define DUMMY_ISR_DIV 10
 
 	struct TimerLoopOffset
 	{
-		uint8_t eda = 0;
-		uint8_t imu = 0;
-		uint8_t ppg = 1;
 		uint8_t led = 4;
-		uint8_t thermopile = 3;
+		uint8_t eda = 1;
+		uint8_t ppg = 1;
+		uint8_t bottomTemp = 2;
 		uint8_t tempHumidity = 2;
-		uint8_t battery = 0;
+		uint8_t thermopile = 0;
+		uint8_t imu = 1;
+		uint8_t battery = 6;
 	} timerLoopOffset;	// Sets initial value of sampling counters
 
 
@@ -285,7 +349,7 @@ public:
 //#define PPG_SAMPLING_DIV 4
 //#define LED_REFRESH_DIV 8
 //#define THERMOPILE_SAMPLING_DIV 16	// TODO: This should change according to the rate set on the thermopile begin function 
-//#define TEMPERATURE_SAMPLING_DIV 4
+//#define TEMPERATURE_0_SAMPLING_DIV 4
 //#define BATTERY_SAMPLING_DIV 20
 
 	//struct TimerLoopOffset
@@ -305,8 +369,11 @@ public:
 		bool thermopile = true;
 		bool imu = true;
 		bool ppg = true;
+		bool tempPpg = true;
 		bool debug = false;
 		bool battery = true;
+		bool heartRate = true; // Note: we may want to move this to a separarte flag someday, for controlling derivative signals
+		bool edrMetrics = true;
 	} acquireData;
 
 	struct ChipBegun {
@@ -321,36 +388,48 @@ public:
 
 	const char *typeTags[(uint8_t)EmotiBit::DataType::length];
 	bool _newDataAvailable[(uint8_t)EmotiBit::DataType::length];
-	uint8_t printLen[(uint8_t)EmotiBit::DataType::length];
-	bool sendData[(uint8_t)EmotiBit::DataType::length];
+	uint8_t _printLen[(uint8_t)EmotiBit::DataType::length];
+	bool _sendData[(uint8_t)EmotiBit::DataType::length];
+	bool _sendSerialData[(uint8_t)EmotiBit::DataType::length];
 
-	SdFat SD;
-	volatile uint8_t battLevel = 100;
+#ifdef ARDUINO_FEATHER_ESP32
+	// SD is already defined in ESP32 
+#else
+	SdFat SD;	// Use SdFat library
+#endif
+
 	volatile uint8_t battIndicationSeq = 0;
 	volatile uint16_t BattLedDuration = 65535;
 
 	EmotiBitWiFi _emotiBitWiFi; 
 	TwoWire* _EmotiBit_i2c = nullptr;
+#ifdef ARDUINO_FEATHER_ESP32
+	uint32_t i2cClkMain = 433000;	// Adjust for empirically slow I2C clock
+#else 
+	uint32_t i2cClkMain = 400000;
+#endif
 	String _outDataPackets;		// Packets that will be sent over wireless (if enabled) and written to SD card (if recording)
 	uint16_t _outDataPacketCounter = 0;
 	//String _outSdPackets;		// Packts that will be written to SD card (if recording) but not sent over wireless
 	//String _inControlPackets;	// Control packets recieved over wireless
 	String _sdCardFilename = "datalog.csv";
-	const char *_configFilename = "config.txt"; 
+#if defined ARDUINO_FEATHER_ESP32
+	const char *_configFilename = "/config.txt";
+#else
+	const char *_configFilename = "config.txt";
+#endif
 	File _dataFile;
 	volatile bool _sdWrite;
 	PowerMode _powerMode;
 	bool _sendTestData = false;
-	float _edlDigFiltAlpha = 0;
-	float _edlDigFilteredVal = -1;
-	float _edaSeriesResistance = 0;
-	float _isrOffsetCorr = 0;
 	DataType _serialData = DataType::length;
 	volatile bool buttonPressed = false;
+	bool startBufferOverflowTest = false;
 
+	void setupFailed(const String failureMode, int buttonPin = -1);
 	bool setupSdCard();
 	void updateButtonPress();
-	void hibernate(bool i2cSetupComplete = true);
+	void sleep(bool i2cSetupComplete = true);
 	void startTimer(int frequencyHz);
 	void setTimerFrequency(int frequencyHz);
 	//void TC3_Handler();
@@ -365,11 +444,17 @@ public:
 	bool writeSdCardMessage(const String &s);
 	int freeMemory();
 	bool loadConfigFile(const String &filename);
+	bool addPacket(uint32_t timestamp, const String typeTag, float * data, size_t dataLen, uint8_t precision = 0, bool printToSerial = false);
 	bool addPacket(uint32_t timestamp, EmotiBit::DataType t, float * data, size_t dataLen, uint8_t precision = 4);
 	bool addPacket(EmotiBit::DataType t);
 	void parseIncomingControlPackets(String &controlPackets, uint16_t &packetNumber);
 	void readSensors();
+	void processHeartRate();
+	void processData();
+	void sendData();
+	bool processThermopileData();	// placeholder until separate EmotiBitThermopile controller is implemented
 	void writeSerialData(EmotiBit::DataType t);
+	void printEmotiBitInfo();
 	
 
 	/**
@@ -414,28 +499,47 @@ public:
 	 */
 	size_t readData(EmotiBit::DataType t, float **data, uint32_t &timestamp);	
 
-	void updateBatteryIndication();
+	void updateBatteryIndication(float battPercent);
 	void appendTestData(String &dataMessage, uint16_t &packetNumber);
 	bool createModePacket(String &modePacket, uint16_t &packetNumber);
 	void sendModePacket(String &sentModePacket, uint16_t &packetNumber);
 	void processDebugInputs(String &debugPackets, uint16_t &packetNumber);
+	void processFactoryTestMessages();
+	/**
+	* Test to assess buffer overflow duration limits
+	* @param maxTestDuration Total duration (in mS) of test to assess overflows
+	* @param delayInterval Interval (in mS) to poll buffers and print results
+	* @param humanReadable Boolean to switch between commas and carriage returns for human readability
+	*/
+	void bufferOverflowTest(unsigned int maxTestDuration = 5000, unsigned int delayInterval = 100, bool humanReadable = true);
+	String getFeatherMacAddress();
 	String getHardwareVersion();
 	int detectEmotiBitVersion();
-
+	/*!
+	 * @brief Function to perform a software reset on the MCU
+	 */
+	void restartMcu();
 	// ----------- END ino refactoring ---------------
 
 	
   EmotiBit();
-  uint8_t setup(size_t bufferCapacity = 64);   /**< Setup all the sensors */
+	
+	/*!
+		@brief Setup of all things EmotiBit
+		@param String firmwareVariant typically passes name of .ino file for traceability
+		@return 0 if successful, otherwise error code [ToDo: Add setup error codes]
+	*/
+  uint8_t setup(String firmwareVariant = "");   /**< Setup all the sensors */
 	uint8_t update();
   void setAnalogEnablePin(uint8_t i); /**< Power on/off the analog circuitry */
   int8_t updateIMUData();                /**< Read any available IMU data from the sensor FIFO into the inputBuffers */
 	int8_t updatePPGData();                /**< Read any available PPG data from the sensor FIFO into the inputBuffers */
-	int8_t updateEDAData();                /**< Take EDA reading and put into the inputBuffer */
 	int8_t updateTempHumidityData();       /**< Read any available temperature and humidity data into the inputBuffers */
+	int8_t updatePpgTempData();			/**< Read any available temp data from PPG into buffer*/
 	int8_t updateThermopileData();         /**< Read Thermopile data into the buffers*/
-	int8_t updateBatteryVoltageData();     /**< Take battery voltage reading and put into the inputBuffer */
-	int8_t updateBatteryPercentData();     /**< Take battery percent reading and put into the inputBuffer */
+	int8_t updateBatteryData();     /**< Reads battery voltage and passes it to different buffers for update */
+	int8_t updateBatteryVoltageData(float battVolt);     /**< updates battery voltage inputBuffer */
+	int8_t updateBatteryPercentData(float battPercent);     /**< updates battery percentage inputBuffer */
 	float convertRawGyro(int16_t gRaw);
 	float convertRawAcc(int16_t aRaw);
 	float convertMagnetoX(int16_t mag_data_x, uint16_t data_rhall);
@@ -452,7 +556,7 @@ public:
   size_t getDataThermopile(float** data, uint32_t * timestamp = nullptr);
 	//size_t dataAvailable(DataType t);
 	float readBatteryVoltage();
-	int8_t readBatteryPercent();
+	int8_t getBatteryPercent(float bv);
 	bool setSensorTimer(SensorTimer t);
 	bool printConfigInfo(File &file, const String &datetimeString);
 	bool setSamplingRates(SamplingRates s);
@@ -462,52 +566,97 @@ public:
 private:
 	float average(BufferFloat &b);
 	int8_t checkIMUClipping(EmotiBit::DataType type, int16_t data, uint32_t timestamp);
-	int8_t pushData(EmotiBit::DataType type, float data, uint32_t * timestamp = nullptr);
+	int8_t pushData(EmotiBit::DataType type, float data, uint32_t * timestamp = nullptr); // Deprecated. BUFFER_OVERFLOW count built into DoubleBuffer now.
 
 	SensorTimer _sensorTimer = SensorTimer::MANUAL;
 	SamplingRates _samplingRates;
 	EnableDigitalFilter _enableDigitalFilter;
 	SamplesAveraged _samplesAveraged;
 	uint8_t _batteryReadPin;
-	uint8_t _edlPin;
-	uint8_t _edrPin;
 	float _vcc;
 	uint8_t _adcBits;
 	float _accelerometerRange; // supported values: 2, 4, 8, 16 (G)
 	float _gyroRange; // supported values: 125, 250, 500, 1000, 2000 (degrees/second)
-	//Version _version;
-	EmotiBitVersionController::EmotiBitVersion _version;
+	EmotiBitVersionController::EmotiBitVersion _hwVersion;
+#if defined(ARDUINO_FEATHER_ESP32)
+	String _featherVersion = "Adafruit Feather HUZZAH32";
+#elif defined(ADAFRUIT_FEATHER_M0)
+	String _featherVersion = "Adafruit Feather M0 WiFi";
+#else
+	String _featherVersion = "UNKNOWN";
+#endif
+	String _sourceId = "EmotiBit FeatherWing";
+	String emotiBitSku;
+	String emotibitDeviceId = "";
+	String firmware_variant = "";
+	uint32_t emotibitSerialNumber;
 	uint8_t _imuFifoFrameLen = 0; // in bytes
 	const uint8_t _maxImuFifoFrameLen = 40; // in bytes
 	uint8_t _imuBuffer[40];
 
+	// ToDo: Utilize on-chip PPG 32 sample buffer
+	// Adjust buffer sizes for different PPG sampling rates & MCUs
+	// See EmotiBit Buffer Size RAM Calculator google sheet
+	// ToDo: Consider how to better manange stack memory allocation
+#if !defined(EMOTIBIT_PPG_100HZ) && !defined(ARDUINO_FEATHER_ESP32)
+	// 2.4 seconds data buffering
+	const uint16_t EDA_BUFFER_SIZE = 36;
+	const uint16_t PPG_BUFFER_SIZE = 60;
+	const uint16_t TEMP_BUFFER_SIZE = 18;
+	const uint16_t IMU_BUFFER_SIZE = 9;
+#endif
+#if !defined(EMOTIBIT_PPG_100HZ) && defined(ARDUINO_FEATHER_ESP32)
+	// 4.8 seconds data buffering
+	const uint16_t EDA_BUFFER_SIZE = 72;
+	const uint16_t PPG_BUFFER_SIZE = 120;
+	const uint16_t TEMP_BUFFER_SIZE = 36;
+	const uint16_t IMU_BUFFER_SIZE = 69;
+#endif
+#if defined(EMOTIBIT_PPG_100HZ) && !defined(ARDUINO_FEATHER_ESP32)
+	// 1.07 seconds data buffering
+	const uint16_t EDA_BUFFER_SIZE = 16;
+	const uint16_t PPG_BUFFER_SIZE = 107;
+	const uint16_t TEMP_BUFFER_SIZE = 8;
+	const uint16_t IMU_BUFFER_SIZE = 8;
+#endif
+#if defined(EMOTIBIT_PPG_100HZ) && defined(ARDUINO_FEATHER_ESP32)
+	// 3.6 seconds data buffering
+	const uint16_t EDA_BUFFER_SIZE = 54;
+	const uint16_t PPG_BUFFER_SIZE = 360;
+	const uint16_t TEMP_BUFFER_SIZE = 27;
+	const uint16_t IMU_BUFFER_SIZE = 39;
+#endif
 
-	DoubleBufferFloat eda			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat edl			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat edr			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat ppgInfrared	 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE);
-	DoubleBufferFloat ppgRed		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE);
-	DoubleBufferFloat ppgGreen		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE);
-	DoubleBufferFloat temp0			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 4);
-	// DoubleBufferFloat tempHP0 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 4);
-	DoubleBufferFloat therm0		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 4); // To store the thermistor Object Temp
-	DoubleBufferFloat therm0AMB		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 4); // To store the raw value AMB from the thermistor
-	DoubleBufferFloat therm0Sto		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 4); // To store the raw Value Sto from the thermistor
-	DoubleBufferFloat humidity0		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 4);
-	DoubleBufferFloat accelX		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat accelY		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat accelZ		 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat gyroX			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat gyroY			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat gyroZ			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat magX			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat magY			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
-	DoubleBufferFloat magZ			 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE / 2);
+	DoubleBufferFloat eda			 = DoubleBufferFloat(EDA_BUFFER_SIZE);
+	DoubleBufferFloat edl			 = DoubleBufferFloat(EDA_BUFFER_SIZE);
+	DoubleBufferFloat edr			 = DoubleBufferFloat(EDA_BUFFER_SIZE);
+	DoubleBufferFloat ppgInfrared	 = DoubleBufferFloat(PPG_BUFFER_SIZE);
+	DoubleBufferFloat ppgRed		 = DoubleBufferFloat(PPG_BUFFER_SIZE);
+	DoubleBufferFloat ppgGreen		 = DoubleBufferFloat(PPG_BUFFER_SIZE);
+	DoubleBufferFloat temp0			 = DoubleBufferFloat(TEMP_BUFFER_SIZE);
+	DoubleBufferFloat temp1		     = DoubleBufferFloat(TEMP_BUFFER_SIZE); // To store the thermistor Object Temp
+	DoubleBufferFloat therm0		 = DoubleBufferFloat(TEMP_BUFFER_SIZE); // To store the thermistor Object Temp
+	DoubleBufferFloat therm0AMB		 = DoubleBufferFloat(TEMP_BUFFER_SIZE); // To store the raw value AMB from the thermistor
+	DoubleBufferFloat therm0Sto		 = DoubleBufferFloat(TEMP_BUFFER_SIZE); // To store the raw Value Sto from the thermistor
+	DoubleBufferFloat humidity0		 = DoubleBufferFloat(TEMP_BUFFER_SIZE);
+	DoubleBufferFloat accelX		 = DoubleBufferFloat(IMU_BUFFER_SIZE); // Account for IMU_CHIP_BUFFER_SIZE when creating BUFFER_SIZE_FACTOR > 1
+	DoubleBufferFloat accelY		 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat accelZ		 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat gyroX			 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat gyroY			 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat gyroZ			 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat magX			 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat magY			 = DoubleBufferFloat(IMU_BUFFER_SIZE);
+	DoubleBufferFloat magZ			 = DoubleBufferFloat(IMU_BUFFER_SIZE);
 	DoubleBufferFloat batteryVoltage = DoubleBufferFloat(1);
 	DoubleBufferFloat batteryPercent = DoubleBufferFloat(1);
-	DoubleBufferFloat dataOverflow	 = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE);
-	DoubleBufferFloat dataClipping   = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE);
+	DoubleBufferFloat dataOverflow	 = DoubleBufferFloat(1);	// ToDo: Refactor with nullptr checks for removal
+	DoubleBufferFloat dataClipping   = DoubleBufferFloat(1);	// ToDo: Refactor with nullptr checks for removal
+#ifdef DEBUG_BUFFER
 	DoubleBufferFloat debugBuffer    = DoubleBufferFloat(MAX_DATA_BUFFER_SIZE);
+#else
+	DoubleBufferFloat debugBuffer = DoubleBufferFloat(1);			// ToDo: Refactor for nullptr checks
+#endif
 
 	DoubleBufferFloat * dataDoubleBuffers[(uint8_t)DataType::length];
 
@@ -515,12 +664,12 @@ private:
 	// Single buffered arrays must only be accessed from ISR functions, not in the main loop
 	// ToDo: add assignment for dynamic allocation;
 	// 	**** WARNING **** THIS MUST MATCH THE SAMPLING DIVS ETC
-	BufferFloat edlBuffer = BufferFloat(24);
-	BufferFloat edrBuffer = BufferFloat(24);	
-	BufferFloat temperatureBuffer = BufferFloat(4);	
-	BufferFloat humidityBuffer = BufferFloat(4);
-	BufferFloat batteryVoltageBuffer = BufferFloat(8);
-	BufferFloat batteryPercentBuffer = BufferFloat(8);
+	BufferFloat edlBuffer = BufferFloat(5);
+	BufferFloat edrBuffer = BufferFloat(5);	
+	BufferFloat temperatureBuffer = BufferFloat(2);	
+	BufferFloat humidityBuffer = BufferFloat(2);
+	BufferFloat batteryVoltageBuffer = BufferFloat(15);
+	BufferFloat batteryPercentBuffer = BufferFloat(15);
 
 	const uint8_t SCOPE_TEST_PIN = A0;
 	bool scopeTestPinOn = false;
@@ -528,7 +677,14 @@ private:
 };
 
 void attachEmotiBit(EmotiBit*e = nullptr);
+#ifdef ADAFRUIT_FEATHER_M0
 void attachToInterruptTC3(void(*readFunction)(void), EmotiBit*e = nullptr);
 void ReadSensors();
+#elif defined ARDUINO_FEATHER_ESP32
+void onTimer();
+void attachToCore(void(*readFunction)(void*), EmotiBit*e = nullptr);
+void ReadSensors(void* pvParameters);
+#endif
+
 
 #endif

@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include "EmotiBit.h"
 
 #define SerialUSB SERIAL_PORT_USBVIRTUAL // Required to work in Visual Micro / Visual Studio IDE
@@ -24,7 +25,7 @@ void onShortButtonPress()
 
 void onLongButtonPress()
 {
-	emotibit.hibernate();
+	emotibit.sleep();
 }
 
 void setup() 
@@ -33,7 +34,15 @@ void setup()
 	Serial.println("Serial started");
 	delay(2000);	// short delay to allow user to connect to serial, if desired
 
-	emotibit.setup();
+	// Capture the calling ino into firmware_variant information
+	String inoFilename = __FILE__;  // returns absolute path of ino file
+	inoFilename.replace("/","\\");  // conform to standard directory separator
+	// extract filename only if directory separator found in absolute path
+	if(inoFilename.lastIndexOf("\\") != -1)
+	{
+		inoFilename = inoFilename.substring((inoFilename.lastIndexOf("\\")) + 1,(inoFilename.indexOf(".")));
+	}
+	emotibit.setup(inoFilename);
 
 	// Attach callback functions
 	emotibit.attachShortButtonPress(&onShortButtonPress);
