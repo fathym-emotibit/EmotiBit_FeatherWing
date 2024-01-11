@@ -263,6 +263,7 @@ void loop()
 
     Serial.println(messagePayloads);
 
+    // Not sure if this will correctly send all of the messages as an array, may need to convert all messagePayloads to individual message EVENT_INSTANCEs and then use another method to send a batch...
     EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayloads, MESSAGE);
 
     Esp32MQTTClient_SendEventInstance(message);
