@@ -246,7 +246,7 @@ void loop()
     }
   }
 
-  payloads.add(payload);
+  payloads.add(&payload);
 
   // TODO: How to run on separate core when present
   {
@@ -260,17 +260,23 @@ void loop()
 
     if (isCaptureInterval || isMemoryAllocated)
     {
-      char messagePayloads[MESSAGE_MAX_LEN];
+      // May need to change this to support batches, but from what i can tell MQTT doesn't support batches
 
-      // serialize the payloads for sending
-      payloads.printTo(messagePayloads);
+      for (int i = 0; i < payloads.size(); i++)
+      {
+        char messagePayload[MESSAGE_MAX_LEN];
 
-      Serial.println(messagePayloads);
+        JsonObject &payloadSend = payloads.at(i);
 
-      // Not sure if this will correctly send all of the messages as an array, may need to convert all messagePayloads to individual message EVENT_INSTANCEs and then use another method to send a batch...
-      EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayloads, MESSAGE);
+        // serialize the payloads for sending
+        payloads.printTo(payloadSend);
 
-      Esp32MQTTClient_SendEventInstance(message);
+        Serial.println(messagePayload);
+
+        EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
+
+        Esp32MQTTClient_SendEventInstance(message);
+      }
 
       lastCapture = 0;
 
