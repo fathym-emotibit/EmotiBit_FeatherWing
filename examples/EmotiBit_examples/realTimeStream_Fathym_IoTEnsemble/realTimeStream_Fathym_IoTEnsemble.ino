@@ -3,7 +3,7 @@
 #include "time.h"
 
 #define SerialUSB SERIAL_PORT_USBVIRTUAL // Required to work in Visual Micro / Visual Studio IDE
-#define MESSAGE_MAX_LEN (1024 * 256)     // Set to max size of IoT Hub Messages
+#define MESSAGE_MAX_LEN (1024 * 250)     // Set to a little short of max size of IoT Hub Messages
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
 EmotiBit emotibit;
@@ -19,7 +19,8 @@ int readingsInterval;
 char metadataTypeTags[3];
 int captureInterval;
 long lastCapture;
-JsonArray & payloadBuffer;
+StaticJsonBuffer<262144> jsonPayloadBuffer; // 1024 * 256
+JsonArray payloads;
 
 void onShortButtonPress()
 {
@@ -199,6 +200,8 @@ void setup()
   configTime(0, 0, ntpServer);
 
   lastCapture = 0;
+
+  payloads = jsonPayloadBuffer.createArray();
 }
 
 void loop()
@@ -243,32 +246,36 @@ void loop()
     }
   }
 
-  &payloadBuffer.add(payload);
+  payloads.add(payload);
 
-  // TODO: Enable more precise memory allocation with V6 of ArduinoJson
-  // long payloadsMemoryUsage = &payloadBuffer.memoryUsage();
-
-  // bool isMemoryAllocated = payloadsMemoryUsage >= MESSAGE_MAX_LEN;
-
-  bool isMemoryAllocated = &payloadBuffer.size() >= 255;
-
-  bool isCaptureInterval = (lastCapture + captureInterval) >= 0;
-
-  if (isCaptureInterval || isMemoryAllocated)
+  // TODO: How to run on separate core when present
   {
-    char messagePayloads[MESSAGE_MAX_LEN];
+    // TODO: Enable more precise memory allocation with V6 of ArduinoJson
+    // long payloadsMemoryUsage = payloads.memoryUsage();
 
-    // serialize the payload for sending
-    &payloadBuffer.printTo(messagePayloads);
+    // bool isMemoryAllocated = payloadsMemoryUsage >= (MESSAGE_MAX_LEN - (1024 * 5));
+    bool isMemoryAllocated = payloads.size() >= 250;
 
-    Serial.println(messagePayloads);
+    bool isCaptureInterval = (lastCapture + captureInterval) >= 0;
 
-    // Not sure if this will correctly send all of the messages as an array, may need to convert all messagePayloads to individual message EVENT_INSTANCEs and then use another method to send a batch...
-    EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayloads, MESSAGE);
+    if (isCaptureInterval || isMemoryAllocated)
+    {
+      char messagePayloads[MESSAGE_MAX_LEN];
 
-    Esp32MQTTClient_SendEventInstance(message);
+      // serialize the payloads for sending
+      payloads.printTo(messagePayloads);
 
-    lastCapture = 0;
+      Serial.println(messagePayloads);
+
+      // Not sure if this will correctly send all of the messages as an array, may need to convert all messagePayloads to individual message EVENT_INSTANCEs and then use another method to send a batch...
+      EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayloads, MESSAGE);
+
+      Esp32MQTTClient_SendEventInstance(message);
+
+      lastCapture = 0;
+
+      payloads = jsonPayloadBuffer.createArray();
+    }
   }
 
   delay(readingsInterval);
