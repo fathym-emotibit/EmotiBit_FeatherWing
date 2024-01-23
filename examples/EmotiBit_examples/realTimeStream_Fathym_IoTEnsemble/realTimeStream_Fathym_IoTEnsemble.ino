@@ -256,7 +256,7 @@ void loop()
 
   payloads.add(&payload);
 
-  // TODO: How to run on separate core when present
+  // TODO: How to run on separate core when present. will loop1 method work?
   {
     // TODO: Enable more precise memory allocation with V6 of ArduinoJson
     // long payloadsMemoryUsage = payloads.memoryUsage();
