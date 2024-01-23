@@ -246,6 +246,8 @@ void loop()
     }
   }
 
+  payloadSensorMetadata["BatteryVoltage"] = emotibit.readBatteryVoltage();
+
   payloads.add(&payload);
 
   // TODO: How to run on separate core when present
