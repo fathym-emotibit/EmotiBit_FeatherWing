@@ -242,7 +242,7 @@ void loop()
   for (String typeTag : fathymReadings)
   {
     enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
-    size_t dataAvailable = emotibit.readSensors().readData((EmotiBit::DataType)dataType, &data[0], dataSize);
+    size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize);
 
     if (dataAvailable > 0)
     {
