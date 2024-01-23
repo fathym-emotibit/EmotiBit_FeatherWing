@@ -254,6 +254,14 @@ void loop()
 
   payloadSensorMetadata["BatteryVoltage"] = emotibit.readBatteryVoltage();
 
+  payloadSensorMetadata["BatteryPercentage"] = emotibit.getBatteryPercent();
+
+  payloadSensorMetadata["MACAddress"] = emotibit.getFeatherMacAddress();
+
+  payloadSensorMetadata["EmotibitVersion"] = emotibit.detectEmotiBitVersion();
+
+  payloadSensorMetadata["HardwareVersion"] = emotibit.getHardwareVersion();
+
   payloads.add(&payload);
 
   // TODO: How to run on separate core when present. will loop1 method work?
