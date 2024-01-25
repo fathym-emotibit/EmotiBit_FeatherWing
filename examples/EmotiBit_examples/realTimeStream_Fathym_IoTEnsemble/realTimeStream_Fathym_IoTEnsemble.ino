@@ -19,7 +19,7 @@ int readingsInterval;
 //char metadataTypeTags[2];
 int captureInterval;
 long lastCapture;
-StaticJsonDocument<16384> jsonPayloadDoc; // 1024 * 16
+StaticJsonDocument<65536> jsonPayloadDoc; // 1024 * 64
 JsonArray payloads;
 
 void onShortButtonPress()
@@ -43,82 +43,44 @@ void onLongButtonPress()
 }
 
 EmotiBit::DataType loadDataTypeFromTypeTag(String typeTag) {
-  if (typeTag == "AX"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::ACCELEROMETER_X};
-    return dataType;
-  } 
-  else if (typeTag == "AY"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::ACCELEROMETER_Y};
-    return dataType;
-  }
-  else if (typeTag == "AZ"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::ACCELEROMETER_Z};
-    return dataType;
-  }
-  else if (typeTag == "GX"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::GYROSCOPE_X};
-    return dataType;
-  }
-  else if (typeTag == "GY"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::GYROSCOPE_Y};
-    return dataType;
-  }
-  else if (typeTag == "GZ"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::GYROSCOPE_Z};
-    return dataType;
-  }
-  else if (typeTag == "MX"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::MAGNETOMETER_X};
-    return dataType;
-  }
-  else if (typeTag == "MY"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::MAGNETOMETER_Y};
-    return dataType;
-  }
-  else if (typeTag == "MZ"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::MAGNETOMETER_Z};
-    return dataType;
-  }
-  else if (typeTag == "EA"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::EDA};
-    return dataType;
-  }
-  else if (typeTag == "EL"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::EDL};
-    return dataType;
-  }
-  else if (typeTag == "ER"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::EDR};
-    return dataType;
-  }
-  else if (typeTag == "H0"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::HUMIDITY_0};
-    return dataType;
-  }
-  else if (typeTag == "T0"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::TEMPERATURE_0};
-    return dataType;
-  }
-  else if (typeTag == "TH"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::THERMOPILE};
-    return dataType;
-  }
-  else if (typeTag == "PI"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::PPG_INFRARED};
-    return dataType;
-  }
-  else if (typeTag == "PR"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::PPG_RED};
-    return dataType;
-  }
-  else if (typeTag == "PG"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::PPG_GREEN};
-    return dataType;
-  }
-  else if (typeTag == "DB"){
-    EmotiBit::DataType dataType {EmotiBit::DataType::DEBUG};
-    return dataType;
-  } 
+  if (typeTag == "AX")
+    return EmotiBit::DataType::ACCELEROMETER_X; 
+  else if (typeTag == "AY")
+    return EmotiBit::DataType::ACCELEROMETER_Y;  
+  else if (typeTag == "AZ")
+    return EmotiBit::DataType::ACCELEROMETER_Z;  
+  else if (typeTag == "GX")
+    return EmotiBit::DataType::GYROSCOPE_X;  
+  else if (typeTag == "GY")
+    return EmotiBit::DataType::GYROSCOPE_Y;
+  else if (typeTag == "GZ")
+    return EmotiBit::DataType::GYROSCOPE_Z;  
+  else if (typeTag == "MX")
+    return EmotiBit::DataType::MAGNETOMETER_X;
+  else if (typeTag == "MY")
+    return EmotiBit::DataType::MAGNETOMETER_Y;
+  else if (typeTag == "MZ")
+    return EmotiBit::DataType::MAGNETOMETER_Z;
+  else if (typeTag == "EA")
+    return EmotiBit::DataType::EDA; 
+  else if (typeTag == "EL")
+    return EmotiBit::DataType::EDL;
+  else if (typeTag == "ER")
+    return EmotiBit::DataType::EDR;
+  else if (typeTag == "H0")
+    return EmotiBit::DataType::HUMIDITY_0;
+  else if (typeTag == "T0")
+    return EmotiBit::DataType::TEMPERATURE_0;
+  else if (typeTag == "TH")
+    return EmotiBit::DataType::THERMOPILE;
+  else if (typeTag == "PI")
+    return EmotiBit::DataType::PPG_INFRARED;
+  else if (typeTag == "PR")
+    return EmotiBit::DataType::PPG_RED;
+  else if (typeTag == "PG")
+    return EmotiBit::DataType::PPG_GREEN;
+  else if (typeTag == "DB")
+    return EmotiBit::DataType::DEBUG;
 }
 
 void setup()
