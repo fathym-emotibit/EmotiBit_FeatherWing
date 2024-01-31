@@ -19,8 +19,7 @@ int readingsInterval;
 //char metadataTypeTags[2];
 int captureInterval;
 long lastCapture;
-StaticJsonDocument<65536> jsonPayloadDoc; // 1024 * 64
-JsonArray payloads;
+//JsonArray payloads;
 
 void onShortButtonPress()
 {
@@ -111,25 +110,31 @@ void setup()
   // Attach callback functions
   emotibit.attachShortButtonPress(&onShortButtonPress);
   emotibit.attachLongButtonPress(&onLongButtonPress);
-
+  Serial.println("After attachbutton: ");
   configTime(0, 0, ntpServer);
+  Serial.println("After configTime: ");
 
   lastCapture = 0;
 
-  payloads = jsonPayloadDoc.to<JsonArray>();
+  //payloads = jsonPayloadDoc.to<JsonArray>();
+  Serial.println("After convert payloads: ");
 }
 
 void loop()
 {
+  Serial.println("Before emotibit update: ");
   emotibit.update();
-
+  Serial.println("After emotibit update: ");
   lastCapture += millis();
   
+  Serial.println("After set lastCapture: ");
   // allocate the memory for the document
   const size_t CAPACITY = JSON_OBJECT_SIZE(1);
   
   StaticJsonDocument<1024> doc;
   
+  //StaticJsonDocument<1024> jsonPayloadDoc; // 1024 * 64
+
   //JsonObject payload = doc.createObject();
 
   doc[String("DeviceID")] = fathymDeviceID;
@@ -137,6 +142,7 @@ void loop()
   doc["DeviceType"] = "emotibit";
 
   doc["Version"] = "1";
+  Serial.println("After setting deviceid and type/version: ");
 
   JsonObject payloadDeviceData = doc.createNestedObject("DeviceData");
 
@@ -154,7 +160,10 @@ void loop()
 
   payloadDeviceData["Timestamp"] = String(epochTime);
 
+  Serial.println("After timestamps: ");
+
   for (String typeTag : fathymReadings) {     
+    Serial.println("Inside For loop: ");
     enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
     size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize);
     //Serial.println("Data Availalbe Size: ");
@@ -188,18 +197,22 @@ void loop()
   //payloadSensorMetadata["EmotibitVersion"] = emotibit.detectEmotiBitVersion();
 
   //payloadSensorMetadata["HardwareVersion"] = emotibit.getHardwareVersion();
+  //JsonArray payloads = doc.as<JsonArray>();
 
-  payloads.add(doc.to<JsonArray>());
+  //if(payloads != NULL){
+    //payloads.add(doc.to<JsonArray>());
+  //}
+  
 
-  bool isMemoryAllocated = payloads.size() >= 250;
+  //bool isMemoryAllocated = payloads.size() >= 250;
 
-  bool isCaptureInterval = (lastCapture + captureInterval) >= 0;
+  //bool isCaptureInterval = (lastCapture + captureInterval) >= 0;
 
-  if (isCaptureInterval || isMemoryAllocated){
-    for (int i = 0; i < payloads.size(); i++){
+  //if (isCaptureInterval || isMemoryAllocated){
+    //for (int i = 0; i < payloads.size(); i++){
       char messagePayload[MESSAGE_MAX_LEN];
 
-      JsonObject payloadSend = payloads[i];
+      //JsonObject payloadSend = payloads[i];
 
       // serialize the payload for sending
       serializeJson(doc, messagePayload);
@@ -209,14 +222,14 @@ void loop()
       EVENT_INSTANCE* message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
 
       Esp32MQTTClient_SendEventInstance(message);
-    }
+    //}
 
-    lastCapture = 0;
+    //lastCapture = 0;
 
-    payloads.clear();
+    //payloads.clear();
 
-    jsonPayloadDoc.clear();
-  }
+    //jsonPayloadDoc.clear();
+  //}
 
   delay(readingsInterval);
 }
@@ -244,20 +257,29 @@ bool loadConfigFile(const char *filename) {
   // Parse the root object
   deserializeJson(doc, file, DeserializationOption::NestingLimit(3));
   //JsonObject root = jsonBuffer.parseObject(file);
-
+  //Serial.print("AFter deserialize: ");
   JsonArray readingValues = doc["Fathym"]["Readings"].as<JsonArray>();
-  
+  //Serial.println("After reading values: ");
+  //int size = static_cast<int>(readingValues.size());
+  //Serial.println(size);
   const char* readings[25];
 
+  //Serial.println(readingValues.size());
   copyArray(readingValues, readings);
   
+  Serial.println("After copy array: ");
   //readingValues.copyTo(readings);
+  //Serial.println(sizeof fathymReadings / sizeof fathymReadings[0]);
 
+  //Serial.println(sizeof readings[0]);
+
+  //Serial.println(sizeof readingValues / sizeof readingValues[0]);
   //Serial.println(
-  for(int i = 0; i < (sizeof readings / sizeof readings[0]); i++){
-    strcpy(fathymReadings[i], readings[i]);
+  for(int i = 0; i < (readingValues.size()); i++){
+    strcpy(fathymReadings[i], readings[i]);    
   }
-    
+
+  //Serial.print("After copying readings: ");  
   //}
 
   if (doc.isNull()) {
@@ -267,11 +289,19 @@ bool loadConfigFile(const char *filename) {
 
   fathymConnectionStringPtr = doc["Fathym"]["ConnectionString"].as<String>();
   
+  //Serial.print("After conn: ");
+
   fathymDeviceID = doc["Fathym"]["DeviceID"].as<String>();
+
+  //Serial.print("After deviceid: ");
 
   readingsInterval = doc["Fathym"]["ReadingInterval"] | 10;
 
+  //Serial.print("After reading interval: ");
+
   readingsInterval = doc["Fathym"]["CaptureInterval"] | 5000;
+
+  //Serial.print("After capture interval: ");
 
   // Close the file (File's destructor doesn't close the file)
   // ToDo: Handle multiple credentials
