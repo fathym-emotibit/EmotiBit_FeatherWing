@@ -105,7 +105,7 @@ void ReadTaskRunner(void *pvParameters)
 
 void ReadTaskLoop()
 {
-  Serial.print("ReadTask loop running");
+  Serial.println("ReadTask loop running");
 
   loadLastLoopStartMillis();
 
