@@ -10,8 +10,8 @@
 #define MESSAGE_MAX_LEN 1024             // Set to a little short of max size of IoT Hub Messages
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
-TaskHandle_T ReadTask;
-TaskHandle_T CaptureTask;
+TaskHandle_t ReadTask;
+TaskHandle_t CaptureTask;
 
 void onShortButtonPress()
 {
