@@ -319,7 +319,7 @@ void loadLastLoopStartMillis()
 
   for (int i = 0; i < readingValues.size(); i++)
   {
-    lastLoopStartMillis[readingValues(i)] = millis();
+    lastLoopStartMillis[readingValues[i]] = millis();
   }
 }
 
