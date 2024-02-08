@@ -153,9 +153,13 @@ void ReadTaskLoop(void *pvParameters)
           Serial.println(": ");
 
           JsonObject reading = payloadSensorTypeReadings.createNestedObject();
-
+          
           reading["Data"] = data[i];
-          reading["Millis"] = elapsedMillis / (i + 1 / dataAvailable);
+          Serial.print("elapsedMillis: ");
+          Serial.println(String(elapsedMillis));
+          Serial.print("Time math: ");
+          Serial.println(String(elapsedMillis))
+          reading["Millis"] = elapsedMillis / ((i + 1) / dataAvailable);
 
           serializeJson(reading, Serial);
         }
@@ -299,4 +303,16 @@ EmotiBit::DataType loadDataTypeFromTypeTag(String typeTag)
     return EmotiBit::DataType::PPG_RED;
   else if (typeTag == "PG")
     return EmotiBit::DataType::PPG_GREEN;
+}
+
+// Function that gets current epoch time
+unsigned long getTime() {
+  time_t now;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    //Serial.println("Failed to obtain time");
+    return(0);
+  }
+  time(&now);
+  return now;
 }
