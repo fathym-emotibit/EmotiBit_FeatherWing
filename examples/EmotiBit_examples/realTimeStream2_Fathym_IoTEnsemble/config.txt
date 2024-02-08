@@ -1,0 +1,1 @@
+{"WifiCredentials": [{"ssid": "SSSS", "password" : "PPPP"}],"Fathym":{"ConnectionString": "xxx", "DeviceID": "yyy", "ReadingInterval": 10, "Readings": ["AX", "AY", "AZ", "TH", "PI", "PR", "PG", "BP"], "CaptureInterval": 5000}}
