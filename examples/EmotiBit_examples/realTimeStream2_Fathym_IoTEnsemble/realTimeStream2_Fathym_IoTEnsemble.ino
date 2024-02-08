@@ -134,6 +134,8 @@ void ReadTaskLoop()
 
       lastLoopStartMillis[typeTag] = millis();
 
+      serializeJson(lastLoopStartMillis, Serial);
+
       uint32_t timestamp;
       size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
 
@@ -318,6 +320,8 @@ void loadLastLoopStartMillis()
   {
     lastLoopStartMillis[readingValues[i]] = millis();
   }
+
+  serializeJson(lastLoopStartMillis, Serial);
 }
 
 // Function that gets current epoch time
