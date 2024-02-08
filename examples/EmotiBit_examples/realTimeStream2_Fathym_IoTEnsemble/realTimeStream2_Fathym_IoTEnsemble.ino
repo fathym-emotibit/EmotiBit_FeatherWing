@@ -115,8 +115,6 @@ void ReadTaskLoop(void *pvParameters)
         Serial.println(typeTag);
         Serial.print("\tDA: ");
         Serial.println(dataAvailable);
-        Serial.print("\tDataSize: ");
-        // Serial.println(data.size());
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
