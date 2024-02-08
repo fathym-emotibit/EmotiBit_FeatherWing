@@ -17,15 +17,18 @@ EmotiBitVersionController::EmotiBitVersion emotibitVersion;
 TaskHandle_t ReadTask;
 TaskHandle_t CaptureTask;
 
+unsigned long epochTime;
+const char *ntpServer = "pool.ntp.org";
 String version;
+
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
-
-int captureInterval;
-String fathymConnectionStringPtr;
 String fathymDeviceID;
 char fathymReadings[18][3] = {{}};
 int readingsInterval;
+
+int captureInterval;
+String fathymConnectionStringPtr;
 
 void setup()
 {
@@ -51,8 +54,9 @@ void setup()
     Serial.println("{\"WifiCredentials\": [{\"ssid\": \"SSSS\", \"password\" : \"PPPP\"}],\"Fathym\":{\"ConnectionString\": \"xxx\", \"DeviceID\": \"yyy\"}}");
   }
 
-  xTaskCreatePinnedToCore(ReadTaskRunner, "Task0", 10000, NULL, 1, &ReadTask, 0);
-  // create a task that executes the Task0code() function, with priority 1 and executed on core 1
+  configTime(0, 0, ntpServer);
+
+  xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
 }
 
@@ -91,13 +95,31 @@ void ReadTaskRunner(void *pvParameters)
 
     ReadTaskLoop(pvParameters);
 
-    delay(10);
+    delay(readingsInterval);
   }
 }
 
 void ReadTaskLoop(void *pvParameters)
 {
   Serial.print("ReadTask loop running");
+
+  StaticJsonDocument<1024> payload;
+
+  payload["DeviceID"] = fathymDeviceID;
+
+  payload["DeviceType"] = "emotibit";
+
+  JsonObject payloadDeviceData = payload.createNestedObject("DeviceData");
+
+  JsonObject payloadSensorReadings = payload.createNestedObject("SensorReadings");
+
+  JsonObject payloadSensorMetadata = payload.createNestedObject("SensorMetadata");
+
+  epochTime = getTime();
+
+  payloadDeviceData["Timestamp"] = String(epochTime);
+
+  long loopStartMillis = millis();
 
   for (String typeTag : fathymReadings)
   {
@@ -111,25 +133,39 @@ void ReadTaskLoop(void *pvParameters)
 
       if (dataAvailable > 0)
       {
+        long elapsedMillis = timestamp - loopStartMillis;
+
         Serial.print("Data Available for ");
         Serial.println(typeTag);
         Serial.print("\tDA: ");
         Serial.println(dataAvailable);
+        Serial.print("\tTimestamp: ");
+        Serial.println(timestamp);
+        Serial.print("\tElapsedMillis: ");
+        Serial.println(elapsedMillis);
+
+        JsonArray payloadSensorTypeReadings = payloadSensorReadings.createNestedArray(typeTag);
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
           Serial.print("Reading for ");
           Serial.print(typeTag);
-          Serial.print(" - ");
-          Serial.print(i);
-          Serial.print(" - ");
-          Serial.print(timestamp);
-          Serial.print(" - ");
-          Serial.println(data[i]);
+          Serial.println(": ");
+
+          JsonObject reading = payloadSensorTypeReadings.createNestedObject();
+
+          reading["Data"] = data[i];
+          reading["Millis"] = elapsedMillis / (i + 1 / dataAvailable);
+
+          serializeJson(reading, Serial);
         }
+
+        payloadSensorReadings[typeTag] = String(data[0]);
       }
     }
   }
+
+  serializeJson(payload, Serial);
 }
 
 void CaptureTaskRunner(void *pvParameters)
@@ -139,8 +175,8 @@ void CaptureTaskRunner(void *pvParameters)
 
   for (;;)
   {
-    // Serial.println("CaptureTask processing");
-    delay(10);
+    Serial.println("CaptureTask processing");
+    delay(captureInterval);
   }
 }
 
