@@ -110,11 +110,23 @@ void ReadTaskRunner(void *pvParameters)
 
   for (;;)
   {
-    Serial.println("ReadTask processing");
-    enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag("PG");
-    uint32_t timestamp;
-    size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
+    emotibit.update();
 
+    ReadTaskLoop(pvParameters);
+
+    delay(10);
+  }
+}
+
+void ReadTaskLoop(void *pvParameters)
+{
+  Serial.print("ReadTask loop running");
+  enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag("PG");
+  uint32_t timestamp;
+  size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
+
+  if (dataAvailable > 0)
+  {
     Serial.print("Reading for ");
     Serial.println(typeTag);
     Serial.print("\tDA: ");
@@ -122,22 +134,17 @@ void ReadTaskRunner(void *pvParameters)
     Serial.print("\tDataSize: ");
     Serial.println(data.size());
 
-    if (dataAvailable > 0)
+    for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
     {
-      // for (int i = 0; i < dataSize; i++)
-      // {
-      //   Serial.print("Reading for ");
-      //   Serial.print(typeTag);
-      //   Serial.print(" - ");
-      //   Serial.print(i);
-      //   Serial.print(" - ");
-      //   Serial.print(timestamp);
-      //   Serial.print(" - ");
-      //   Serial.println(data[i]);
-      // }
+      Serial.print("Reading for ");
+      Serial.print(typeTag);
+      Serial.print(" - ");
+      Serial.print(i);
+      Serial.print(" - ");
+      Serial.print(timestamp);
+      Serial.print(" - ");
+      Serial.println(data[i]);
     }
-
-    delay(10);
   }
 }
 
