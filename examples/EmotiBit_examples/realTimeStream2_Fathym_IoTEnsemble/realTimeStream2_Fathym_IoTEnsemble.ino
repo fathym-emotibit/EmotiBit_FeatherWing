@@ -106,7 +106,9 @@ void ReadTaskRunner(void *pvParameters)
 
 void ReadTaskLoop()
 {
-  Serial.print("ReadTask loop running");
+  Serial.println("ReadTask loop running");
+
+  loadLastLoopStartMillis();
 
   StaticJsonDocument<1024> payload;
 
@@ -323,6 +325,7 @@ void loadLastLoopStartMillis()
   {
     lastLoopStartMillis[readingValues[i]] = millis();
   }
+  Serial.println("Hey Right Here!");
 
   serializeJson(lastLoopStartMillis, Serial);
 }
