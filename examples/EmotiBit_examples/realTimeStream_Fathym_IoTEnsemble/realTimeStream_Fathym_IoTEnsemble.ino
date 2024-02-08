@@ -10,6 +10,7 @@
 #define MESSAGE_MAX_LEN 1024 // Set to a little short of max size of IoT Hub Messages
 const uint32_t SERIAL_BAUD = 2000000; //115200
 
+TaskHandle_t Task0;
 TwoWire* emotibitI2c;
 EmotiBit emotibit;
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
@@ -30,8 +31,8 @@ String version;
 //char metadataTypeTags[2];
 int captureInterval;
 long lastCapture;
-//JsonArray payloads;
-//StaticJsonDocument<65536> jsonPayloadDoc; // 1024 * 64
+JsonArray payloads;
+StaticJsonDocument<65536> jsonPayloadDoc; // 1024 * 64
 
 void onShortButtonPress()
 {
@@ -132,7 +133,7 @@ void setup()
 
   lastCapture = 0;
 
-  //payloads = jsonPayloadDoc.to<JsonArray>();
+  payloads = jsonPayloadDoc.to<JsonArray>();
   //Serial.println("After convert payloads: ");
 }
 
@@ -141,7 +142,7 @@ void loop()
   //Serial.println("Before emotibit update: ");
   emotibit.update();
   //Serial.println("After emotibit update: ");
-  //lastCapture += millis();
+  lastCapture += millis();
   
   //Serial.println("After set lastCapture: ");
   // allocate the memory for the document
@@ -183,15 +184,27 @@ void loop()
     //Serial.println("Inside For loop: ");
     if (typeTag != NULL){
       enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
-      size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize);
+      uint32_t timestamp;
+      size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
       //Serial.println("Data Availalbe Size: ");
       //Serial.println(dataAvailable);
       //Serial.println("Reading Types: ");
       //Serial.println(typeTag);
       //Serial.println(String(data[dataAvailable - 1]));
-
+      
       if (dataAvailable > 0)
       {
+        for (int i = 0; i < dataSize; i++)
+        {
+          Serial.print("Reading for ");
+          Serial.print(typeTag);
+          Serial.print(" - ");
+          Serial.print(i);
+          Serial.print(" - ");
+          Serial.print(timestamp);
+          Serial.print(" - ");
+          Serial.println(data[i]); 
+        }
         //payloadSensorReadings[typeTag] = String(data[dataAvailable - 1]);
 
         payloadSensorMetadataMillisAdjustments[typeTag] = millis() - millisAdjustmentStart;
