@@ -20,6 +20,7 @@ TaskHandle_t CaptureTask;
 unsigned long epochTime;
 const char *ntpServer = "pool.ntp.org";
 String version;
+long lastLoopStartMillis;
 
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
@@ -58,6 +59,8 @@ void setup()
 
   xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
+
+  lastLoopStartMillis = millis();
 }
 
 void loop()
@@ -91,17 +94,17 @@ void ReadTaskRunner(void *pvParameters)
 
   for (;;)
   {
-    long loopStartMillis = millis();
-
     emotibit.update();
 
-    ReadTaskLoop(loopStartMillis);
+    ReadTaskLoop();
+
+    lastLoopStartMillis = millis();
 
     delay(readingsInterval);
   }
 }
 
-void ReadTaskLoop(long loopStartMillis)
+void ReadTaskLoop()
 {
   Serial.print("ReadTask loop running");
 
@@ -133,14 +136,14 @@ void ReadTaskLoop(long loopStartMillis)
 
       if (dataAvailable > 0)
       {
-        long elapsedMillis = timestamp - loopStartMillis;
+        long elapsedMillis = timestamp - lastLoopStartMillis;
 
         Serial.print("Data Available for ");
         Serial.println(typeTag);
         Serial.print("\tDA: ");
         Serial.println(dataAvailable);
-        Serial.print("\tLoopStartMillis: ");
-        Serial.println(loopStartMillis);
+        Serial.print("\tLastLoopStartMillis: ");
+        Serial.println(lastLoopStartMillis);
         Serial.print("\tTimestamp: ");
         Serial.println(timestamp);
         Serial.print("\tElapsedMillis: ");
