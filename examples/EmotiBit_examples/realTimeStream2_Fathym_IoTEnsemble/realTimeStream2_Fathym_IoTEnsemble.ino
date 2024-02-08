@@ -10,10 +10,12 @@
 #define MESSAGE_MAX_LEN 1024             // Set to a little short of max size of IoT Hub Messages
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
-Emotibit emotibit;
+EmotiBit emotibit;
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
-
+EmotiBitVersionController emotibitVersionController;
+EmotiBitVersionController::EmotiBitVersion emotibitVersion;
+String version;
 TaskHandle_t ReadTask;
 TaskHandle_t CaptureTask;
 
@@ -110,17 +112,19 @@ void ReadTaskRunner(void *pvParameters)
 
   for (;;)
   {
+    emotibit.update();
+    
     Serial.println("ReadTask processing");
-    enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag("PG");
+    enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag("AX");
     uint32_t timestamp;
     size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
 
     Serial.print("Reading for ");
-    Serial.println(typeTag);
+    Serial.println("AX");
     Serial.print("\tDA: ");
     Serial.println(dataAvailable);
     Serial.print("\tDataSize: ");
-    Serial.println(data.size());
+    //Serial.println(data.size());
 
     if (dataAvailable > 0)
     {
