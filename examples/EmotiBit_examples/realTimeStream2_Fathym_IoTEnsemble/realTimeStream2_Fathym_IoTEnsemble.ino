@@ -321,10 +321,11 @@ void loadLastLoopStartMillis()
 
   JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
 
-  for (int i = 0; i < readingValues.size(); i++)
+  for (JsonVariant readingValue : readingValues)
   {
-    lastLoopStartMillis[readingValues[i]] = millis();
+    lastLoopStartMillis[readingValue.as<string>()] = millis();
   }
+
   Serial.println("Hey Right Here!");
 
   serializeJson(lastLoopStartMillis, Serial);
