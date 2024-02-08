@@ -124,6 +124,8 @@ void ReadTaskLoop()
 
   payloadDeviceData["Timestamp"] = String(epochTime);
 
+  // long loopStartMillis = lastLoopStartMillis;
+
   for (String typeTag : fathymReadings)
   {
     // Serial.println("Inside For loop: ");
@@ -133,6 +135,8 @@ void ReadTaskLoop()
 
       uint32_t timestamp;
       size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
+
+      // lastLoopStartMillis = millis();
 
       if (dataAvailable > 0)
       {
@@ -153,22 +157,22 @@ void ReadTaskLoop()
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
-          Serial.print("Reading for ");
-          Serial.print(typeTag);
-          Serial.println(": ");
+          // Serial.print("Reading for ");
+          // Serial.print(typeTag);
+          // Serial.println(": ");
 
           JsonObject reading = payloadSensorTypeReadings.createNestedObject();
           
           reading["Data"] = data[i];
 
-          Serial.print("Time math: ");
-          Serial.println(String((i + 1) / dataAvailable));
-          Serial.print("elapsedMillis: ");
-          Serial.println(String(elapsedMillis));
+          // Serial.print("Time math: ");
+          // Serial.println(String((i + 1) / dataAvailable));
+          // Serial.print("elapsedMillis: ");
+          // Serial.println(String(elapsedMillis));
 
           reading["Millis"] = ((i + 1) / dataAvailable) * elapsedMillis;
 
-          serializeJson(reading, Serial);
+          // serializeJson(reading, Serial);
         }
 
         payloadSensorReadings[typeTag] = String(data[0]);
