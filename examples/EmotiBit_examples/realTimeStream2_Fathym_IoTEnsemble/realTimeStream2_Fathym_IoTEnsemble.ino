@@ -21,7 +21,8 @@ StaticJsonDocument<1024> config;
 unsigned long epochTime;
 const char *ntpServer = "pool.ntp.org";
 String version;
-StaticJsonDocument<1024> lastLoopStartMillis;
+StaticJsonDocument<1024> lastLoopStartMillisDoc;
+JsonObject lastLoopStartMillis;
 
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
@@ -314,6 +315,8 @@ EmotiBit::DataType loadDataTypeFromTypeTag(String typeTag)
 
 void loadLastLoopStartMillis()
 {
+  lastLoopStartMillis = lastLoopStartMillisDoc.to<JsonObject>();
+
   JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
 
   for (int i = 0; i < readingValues.size(); i++)
