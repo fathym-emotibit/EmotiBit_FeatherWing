@@ -107,6 +107,8 @@ void ReadTaskLoop()
 {
   Serial.print("ReadTask loop running");
 
+  loadLastLoopStartMillis();
+
   StaticJsonDocument<1024> payload;
 
   payload["DeviceID"] = fathymDeviceID;
@@ -320,6 +322,7 @@ void loadLastLoopStartMillis()
   {
     lastLoopStartMillis[readingValues[i]] = millis();
   }
+  Serial.println("Hey Right Here!");
 
   serializeJson(lastLoopStartMillis, Serial);
 }
