@@ -155,11 +155,13 @@ void ReadTaskLoop(void *pvParameters)
           JsonObject reading = payloadSensorTypeReadings.createNestedObject();
           
           reading["Data"] = data[i];
+
+          Serial.print("Time math: ");
+          Serial.println(String((i + 1) / dataAvailable));
           Serial.print("elapsedMillis: ");
           Serial.println(String(elapsedMillis));
-          Serial.print("Time math: ");
-          Serial.println(String(elapsedMillis))
-          reading["Millis"] = elapsedMillis / ((i + 1) / dataAvailable);
+
+          reading["Millis"] = ((i + 1) / dataAvailable) * elapsedMillis;
 
           serializeJson(reading, Serial);
         }
