@@ -111,7 +111,7 @@ void ReadTaskLoop(void *pvParameters)
 
       if (dataAvailable > 0)
       {
-        Serial.print("Reading for ");
+        Serial.print("Data Available for ");
         Serial.println(typeTag);
         Serial.print("\tDA: ");
         Serial.println(dataAvailable);
