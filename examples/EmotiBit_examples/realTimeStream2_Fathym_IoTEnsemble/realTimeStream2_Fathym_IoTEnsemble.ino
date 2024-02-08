@@ -17,10 +17,12 @@ EmotiBitVersionController::EmotiBitVersion emotibitVersion;
 TaskHandle_t ReadTask;
 TaskHandle_t CaptureTask;
 
+StaticJsonDocument<1024> config;
 unsigned long epochTime;
 const char *ntpServer = "pool.ntp.org";
 String version;
-long lastLoopStartMillis;
+StaticJsonDocument<1024> lastLoopStartMillisDoc;
+JsonObject lastLoopStartMillis;
 
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
@@ -57,10 +59,10 @@ void setup()
 
   configTime(0, 0, ntpServer);
 
+  loadLastLoopStartMillis();
+
   xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
-
-  lastLoopStartMillis = millis();
 }
 
 void loop()
@@ -98,8 +100,6 @@ void ReadTaskRunner(void *pvParameters)
 
     ReadTaskLoop();
 
-    lastLoopStartMillis = millis();
-
     delay(readingsInterval);
   }
 }
@@ -124,8 +124,6 @@ void ReadTaskLoop()
 
   payloadDeviceData["Timestamp"] = String(epochTime);
 
-  // long loopStartMillis = lastLoopStartMillis;
-
   for (String typeTag : fathymReadings)
   {
     // Serial.println("Inside For loop: ");
@@ -133,21 +131,23 @@ void ReadTaskLoop()
     {
       enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
 
+      long loopStartMillis = lastLoopStartMillis[typeTag];
+
+      lastLoopStartMillis[typeTag] = millis();
+
       uint32_t timestamp;
       size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
 
-      // lastLoopStartMillis = millis();
-
       if (dataAvailable > 0)
       {
-        long elapsedMillis = timestamp - lastLoopStartMillis;
+        long elapsedMillis = timestamp - loopStartMillis;
 
         Serial.print("Data Available for ");
         Serial.println(typeTag);
         Serial.print("\tDA: ");
         Serial.println(dataAvailable);
-        Serial.print("\tLastLoopStartMillis: ");
-        Serial.println(lastLoopStartMillis);
+        Serial.print("\tLoopStartMillis: ");
+        Serial.println(loopStartMillis);
         Serial.print("\tTimestamp: ");
         Serial.println(timestamp);
         Serial.print("\tElapsedMillis: ");
@@ -212,16 +212,11 @@ bool loadConfigFile(const char *filename)
   Serial.print("Parsing: ");
   Serial.println(filename);
 
-  // Allocate the memory pool on the stack.
-  // Don't forget to change the capacity to match your JSON document.
-  // Use arduinojson.org/assistant to compute the capacity.
-  StaticJsonDocument<1024> doc;
-
   // Parse the root object
-  deserializeJson(doc, file, DeserializationOption::NestingLimit(3));
+  deserializeJson(config, file, DeserializationOption::NestingLimit(3));
   // JsonObject root = jsonBuffer.parseObject(file);
   // Serial.print("AFter deserialize: ");
-  JsonArray readingValues = doc["Fathym"]["Readings"].as<JsonArray>();
+  JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
   // Serial.println("After reading values: ");
   // int size = static_cast<int>(readingValues.size());
   // Serial.println(size);
@@ -246,25 +241,25 @@ bool loadConfigFile(const char *filename)
   // Serial.print("After copying readings: ");
   // }
 
-  if (doc.isNull())
+  if (config.isNull())
   {
     Serial.println(F("Failed to parse config file"));
     return false;
   }
 
-  fathymConnectionStringPtr = doc["Fathym"]["ConnectionString"].as<String>();
+  fathymConnectionStringPtr = config["Fathym"]["ConnectionString"].as<String>();
 
   // Serial.print("After conn: ");
 
-  fathymDeviceID = doc["Fathym"]["DeviceID"].as<String>();
+  fathymDeviceID = config["Fathym"]["DeviceID"].as<String>();
 
   // Serial.print("After deviceid: ");
 
-  readingsInterval = doc["Fathym"]["ReadingInterval"] | 10;
+  readingsInterval = config["Fathym"]["ReadingInterval"] | 10;
 
   // Serial.print("After reading interval: ");
 
-  captureInterval = doc["Fathym"]["CaptureInterval"] | 5000;
+  captureInterval = config["Fathym"]["CaptureInterval"] | 5000;
 
   // Serial.print("After capture interval: ");
 
@@ -314,6 +309,18 @@ EmotiBit::DataType loadDataTypeFromTypeTag(String typeTag)
     return EmotiBit::DataType::PPG_RED;
   else if (typeTag == "PG")
     return EmotiBit::DataType::PPG_GREEN;
+}
+
+void loadLastLoopStartMillis()
+{
+  lastLoopStartMillis = lastLoopStartMillisDoc.as<JsonObject>();
+
+  JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
+
+  for (int i = 0; i < readingValues.size(); i++)
+  {
+    lastLoopStartMillis[readingValues(i)] = millis();
+  }
 }
 
 // Function that gets current epoch time
