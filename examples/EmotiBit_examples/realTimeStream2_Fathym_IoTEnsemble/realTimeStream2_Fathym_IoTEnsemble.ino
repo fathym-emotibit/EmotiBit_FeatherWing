@@ -106,8 +106,8 @@ void ReadTaskRunner(void *pvParameters)
 
   for (;;)
   {
-    Serial.println("Core 0 processing");
-    delay((int)random(100, 1000));
+    Serial.println("ReadTask processing");
+    delay(10);
   }
 }
 
@@ -118,7 +118,7 @@ void CaptureTaskRunner(void *pvParameters)
 
   for (;;)
   {
-    Serial.println("Core 0 processing");
-    delay((int)random(100, 1000));
+    Serial.println("CaptureTask processing");
+    delay(10);
   }
 }
