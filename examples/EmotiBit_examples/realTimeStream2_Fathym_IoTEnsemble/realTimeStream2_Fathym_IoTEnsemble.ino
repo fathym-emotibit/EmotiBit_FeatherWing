@@ -139,6 +139,8 @@ void ReadTaskLoop(long loopStartMillis)
         Serial.println(typeTag);
         Serial.print("\tDA: ");
         Serial.println(dataAvailable);
+        Serial.print("\tloopStartMillis: ");
+        Serial.println(loopStartMillis);
         Serial.print("\tTimestamp: ");
         Serial.println(timestamp);
         Serial.print("\tElapsedMillis: ");
