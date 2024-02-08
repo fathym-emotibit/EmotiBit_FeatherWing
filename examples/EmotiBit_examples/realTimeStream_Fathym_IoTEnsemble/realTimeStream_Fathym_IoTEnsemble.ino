@@ -1,11 +1,16 @@
 #include "Esp32MQTTClient.h"
 #include "EmotiBit.h"
 #include "time.h"
+#include "EmotiBitVersionController.h"
+#include "EmotiBitVariants.h"
+//#include "EmotiBitNvmController.h"
+//#include <Wire.h>
 
 #define SerialUSB SERIAL_PORT_USBVIRTUAL // Required to work in Visual Micro / Visual Studio IDE
-#define MESSAGE_MAX_LEN (1024 * 250) // Set to a little short of max size of IoT Hub Messages
-const uint32_t SERIAL_BAUD = 115200; //115200
+#define MESSAGE_MAX_LEN 1024 // Set to a little short of max size of IoT Hub Messages
+const uint32_t SERIAL_BAUD = 2000000; //115200
 
+TwoWire* emotibitI2c;
 EmotiBit emotibit;
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
@@ -14,12 +19,19 @@ unsigned long epochTime;
 const char* ntpServer = "pool.ntp.org";
 String fathymConnectionStringPtr;
 String fathymDeviceID;
-char fathymReadings[25][2] = {{}};
+char fathymReadings[18][3] = {{}};
 int readingsInterval;
+EmotiBitVersionController emotibitVersionController;
+EmotiBitVersionController::EmotiBitVersion emotibitVersion;
+String version;
+//EmotiBitNvmController emotibitNvmController;
+//String sku;
+//uint32_t emotibitSerialNumber;
 //char metadataTypeTags[2];
 int captureInterval;
 long lastCapture;
 //JsonArray payloads;
+//StaticJsonDocument<65536> jsonPayloadDoc; // 1024 * 64
 
 void onShortButtonPress()
 {
@@ -77,9 +89,7 @@ EmotiBit::DataType loadDataTypeFromTypeTag(String typeTag) {
   else if (typeTag == "PR")
     return EmotiBit::DataType::PPG_RED;
   else if (typeTag == "PG")
-    return EmotiBit::DataType::PPG_GREEN;
-  else if (typeTag == "DB")
-    return EmotiBit::DataType::DEBUG;
+    return EmotiBit::DataType::PPG_GREEN; 
 }
 
 void setup()
@@ -88,14 +98,20 @@ void setup()
   Serial.println("Serial started");
   delay(2000);  // short delay to allow user to connect to serial, if desired
 
+  version = EmotiBitVersionController::getHardwareVersion(emotibitVersion);
+  
   emotibit.setup();
+
+  //emotibitI2c = new TwoWire(&sercom1, 11, 13); // data, clk
+  //emotibitI2c->begin();
+ // emotibitI2c->setClock(400000);
 
   if (!loadConfigFile(emotibit._configFilename)) {
     Serial.println("SD card configuration file parsing failed.");
     Serial.println("Create a file 'config.txt' with the following JSON:");
     Serial.println("{\"WifiCredentials\": [{\"ssid\": \"SSSS\", \"password\" : \"PPPP\"}],\"Fathym\":{\"ConnectionString\": \"xxx\", \"DeviceID\": \"yyy\"}}");
   }
-  
+
   const char* connStr = fathymConnectionStringPtr.c_str();
   
   if (!Esp32MQTTClient_Init((const uint8_t*)connStr, true))
@@ -110,24 +126,24 @@ void setup()
   // Attach callback functions
   emotibit.attachShortButtonPress(&onShortButtonPress);
   emotibit.attachLongButtonPress(&onLongButtonPress);
-  Serial.println("After attachbutton: ");
+  //Serial.println("After attachbutton: ");
   configTime(0, 0, ntpServer);
-  Serial.println("After configTime: ");
+  //Serial.println("After configTime: ");
 
   lastCapture = 0;
 
   //payloads = jsonPayloadDoc.to<JsonArray>();
-  Serial.println("After convert payloads: ");
+  //Serial.println("After convert payloads: ");
 }
 
 void loop()
 {
-  Serial.println("Before emotibit update: ");
+  //Serial.println("Before emotibit update: ");
   emotibit.update();
-  Serial.println("After emotibit update: ");
-  lastCapture += millis();
+  //Serial.println("After emotibit update: ");
+  //lastCapture += millis();
   
-  Serial.println("After set lastCapture: ");
+  //Serial.println("After set lastCapture: ");
   // allocate the memory for the document
   const size_t CAPACITY = JSON_OBJECT_SIZE(1);
   
@@ -141,8 +157,7 @@ void loop()
 
   doc["DeviceType"] = "emotibit";
 
-  doc["Version"] = "1";
-  Serial.println("After setting deviceid and type/version: ");
+  //Serial.println("After setting deviceid and type/version: ");
 
   JsonObject payloadDeviceData = doc.createNestedObject("DeviceData");
 
@@ -150,53 +165,53 @@ void loop()
 
   JsonObject payloadSensorMetadata = doc.createNestedObject("SensorMetadata");
 
-  JsonObject payloadSensorMetadataMicrosAdjustments = payloadSensorMetadata.createNestedObject("MicrosAdjustments");
+  JsonObject payloadSensorMetadataMillisAdjustments = payloadSensorMetadata.createNestedObject("MillisAdjustments");
 
-  JsonObject payloadSensorMetadataRoot = payloadSensorMetadata.createNestedObject("_");
+  //JsonObject payloadSensorMetadataRoot = payloadSensorMetadata.createNestedObject("_");
 
   epochTime = getTime();
 
-  long microsAdjustmentStart = micros();
-
   payloadDeviceData["Timestamp"] = String(epochTime);
 
-  Serial.println("After timestamps: ");
+  long millisAdjustmentStart = millis();
+
+  payloadDeviceData["TimeElapsed"] = String(millisAdjustmentStart);
+
+  //Serial.println("After timestamps: ");
 
   for (String typeTag : fathymReadings) {     
-    Serial.println("Inside For loop: ");
-    enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
-    size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize);
-    //Serial.println("Data Availalbe Size: ");
-    //Serial.println(dataAvailable);
-    //Serial.println("Reading Types: ");
-    //Serial.println(typeTag);
-    //Serial.println(String(data[dataAvailable - 1]));
+    //Serial.println("Inside For loop: ");
+    if (typeTag != NULL){
+      enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
+      size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize);
+      //Serial.println("Data Availalbe Size: ");
+      //Serial.println(dataAvailable);
+      //Serial.println("Reading Types: ");
+      //Serial.println(typeTag);
+      //Serial.println(String(data[dataAvailable - 1]));
 
-    if (dataAvailable > 0)
-    {
-      payloadSensorReadings[typeTag] = String(data[dataAvailable - 1]);
+      if (dataAvailable > 0)
+      {
+        //payloadSensorReadings[typeTag] = String(data[dataAvailable - 1]);
 
-      payloadSensorMetadataMicrosAdjustments[typeTag] = micros() - microsAdjustmentStart;
-      //payloadSensorReadings[typeTag] = String(data[0]);
+        payloadSensorMetadataMillisAdjustments[typeTag] = millis() - millisAdjustmentStart;
+        payloadSensorReadings[typeTag] = String(data[0]);
+      }
     }
   }
-  //static DigitalFilter filterBattVolt(DigitalFilter::FilterType::IIR_LOWPASS, ((BASE_SAMPLING_FREQ) / (BATTERY_SAMPLING_DIV)) / (_samplesAveraged.battery), 0.01);
-
   float battVolt = emotibit.readBatteryVoltage();
-
-  //battVolt = filterBattVolt.filter(battVolt);
 
   float battPcent = emotibit.getBatteryPercent(battVolt);
 
-  payloadSensorMetadata["BatteryVoltage"] = battVolt;
+  //payloadSensorMetadata["BatteryVoltage"] = battVolt;
 
   payloadSensorMetadata["BatteryPercentage"] = battPcent;
 
   payloadSensorMetadata["MACAddress"] = emotibit.getFeatherMacAddress();
 
-  //payloadSensorMetadata["EmotibitVersion"] = emotibit.detectEmotiBitVersion();
+  //payloadSensorMetadata["EmotibitVersion"] = version;
 
-  //payloadSensorMetadata["HardwareVersion"] = emotibit.getHardwareVersion();
+  payloadSensorMetadata["EmotibitVersion"] = version;
   //JsonArray payloads = doc.as<JsonArray>();
 
   //if(payloads != NULL){
@@ -210,18 +225,18 @@ void loop()
 
   //if (isCaptureInterval || isMemoryAllocated){
     //for (int i = 0; i < payloads.size(); i++){
-      char messagePayload[MESSAGE_MAX_LEN];
+  char messagePayload[MESSAGE_MAX_LEN];
 
-      //JsonObject payloadSend = payloads[i];
+  //JsonObject payloadSend = payloads[i];
 
-      // serialize the payload for sending
-      serializeJson(doc, messagePayload);
+  // serialize the payload for sending
+  serializeJson(doc, messagePayload);
 
-      Serial.println(messagePayload);
+  Serial.println(messagePayload);
 
-      EVENT_INSTANCE* message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
+  EVENT_INSTANCE* message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
 
-      Esp32MQTTClient_SendEventInstance(message);
+  Esp32MQTTClient_SendEventInstance(message);
     //}
 
     //lastCapture = 0;
@@ -262,12 +277,12 @@ bool loadConfigFile(const char *filename) {
   //Serial.println("After reading values: ");
   //int size = static_cast<int>(readingValues.size());
   //Serial.println(size);
-  const char* readings[25];
+  const char* readings[18];
 
-  //Serial.println(readingValues.size());
+  Serial.println(readingValues.size());
   copyArray(readingValues, readings);
   
-  Serial.println("After copy array: ");
+  //Serial.println("After copy array: ");
   //readingValues.copyTo(readings);
   //Serial.println(sizeof fathymReadings / sizeof fathymReadings[0]);
 
@@ -275,7 +290,7 @@ bool loadConfigFile(const char *filename) {
 
   //Serial.println(sizeof readingValues / sizeof readingValues[0]);
   //Serial.println(
-  for(int i = 0; i < (readingValues.size()); i++){
+  for(int i = 0; i < readingValues.size(); i++){
     strcpy(fathymReadings[i], readings[i]);    
   }
 
