@@ -135,8 +135,10 @@ void ReadTaskRunner(void *pvParameters)
       //   Serial.print(" - ");
       //   Serial.println(data[i]);
       // }
-      delay(10);
     }
+
+    delay(10);
+  }
 }
 
 void CaptureTaskRunner(void *pvParameters)
