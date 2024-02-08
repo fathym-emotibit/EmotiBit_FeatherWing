@@ -91,15 +91,17 @@ void ReadTaskRunner(void *pvParameters)
 
   for (;;)
   {
+    long loopStartMillis = millis();
+
     emotibit.update();
 
-    ReadTaskLoop(pvParameters);
+    ReadTaskLoop(loopStartMillis);
 
     delay(readingsInterval);
   }
 }
 
-void ReadTaskLoop(void *pvParameters)
+void ReadTaskLoop(long loopStartMillis)
 {
   Serial.print("ReadTask loop running");
 
@@ -118,8 +120,6 @@ void ReadTaskLoop(void *pvParameters)
   epochTime = getTime();
 
   payloadDeviceData["Timestamp"] = String(epochTime);
-
-  long loopStartMillis = millis();
 
   for (String typeTag : fathymReadings)
   {
