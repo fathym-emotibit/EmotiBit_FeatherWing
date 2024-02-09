@@ -6,8 +6,11 @@
 // #include "EmotiBitNvmController.h"
 // #include <Wire.h>
 
-#define SerialUSB SERIAL_PORT_USBVIRTUAL // Required to work in Visual Micro / Visual Studio IDE
-#define MESSAGE_MAX_LEN 1024             // Set to a little short of max size of IoT Hub Messages
+#define SerialUSB SERIAL_PORT_USBVIRTUAL                           // Required to work in Visual Micro / Visual Studio IDE
+#define BATCH_SIZE (10)                                            // The number of messages to batch into a single call
+#define HUB_MESSAGE_MAX_LEN (1000 * 250)                           // Set to a little short of max size of IoT Hub Messages (256 KB)
+#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)        // The max size of a single payload
+#define PAYLOADS_MAX_SIZE (HUB_MESSAGE_MAX_LEN - PAYLOAD_MAX_SIZE) // The maximum size
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
 EmotiBit emotibit;
@@ -59,42 +62,25 @@ void setup()
 
   configTime(0, 0, ntpServer);
 
-  
-
   xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
+
+  loadLastLoopStartMillis();
+
+  Serial.println("#################################");
+  Serial.println("# Open Biotech Real Time Stream #");
+  Serial.println("#################################");
 }
 
 void loop()
 {
-}
-
-void onShortButtonPress()
-{
-  // toggle wifi on/off
-  if (emotibit.getPowerMode() == EmotiBit::PowerMode::NORMAL_POWER)
-  {
-    emotibit.setPowerMode(EmotiBit::PowerMode::WIRELESS_OFF);
-    Serial.println("PowerMode::WIRELESS_OFF");
-  }
-  else
-  {
-    emotibit.setPowerMode(EmotiBit::PowerMode::NORMAL_POWER);
-    Serial.println("PowerMode::NORMAL_POWER");
-  }
-}
-
-void onLongButtonPress()
-{
-  emotibit.sleep();
+  // TODO: Device Health Monitoring, cloud-to-device message handling, device twin syncing?
 }
 
 void ReadTaskRunner(void *pvParameters)
 {
   Serial.print("ReadTask running on core ");
   Serial.println(xPortGetCoreID());
-
-  loadLastLoopStartMillis();
 
   for (;;)
   {   
@@ -110,7 +96,7 @@ void ReadTaskLoop()
 {
   Serial.println("ReadTask loop running");
 
-  StaticJsonDocument<1024> payload;
+  StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payload;
 
   payload["DeviceID"] = fathymDeviceID;
 
@@ -142,7 +128,7 @@ void ReadTaskLoop()
 
       serializeJson(lastLoopStartMillis, Serial);
 
-      if (dataAvailable > 0)
+      if (dataAvailable > 0 && loopStartMillis > 0)
       {
         long elapsedMillis = timestamp - loopStartMillis;
 
@@ -178,8 +164,6 @@ void ReadTaskLoop()
 
           serializeJson(reading, Serial);
         }
-
-        //payloadSensorReadings[typeTag] = String(data[0]);
       }
     }
   }
@@ -352,4 +336,24 @@ unsigned long getTime() {
   }
   time(&now);
   return now;
+}
+
+void onShortButtonPress()
+{
+  // toggle wifi on/off
+  if (emotibit.getPowerMode() == EmotiBit::PowerMode::NORMAL_POWER)
+  {
+    emotibit.setPowerMode(EmotiBit::PowerMode::WIRELESS_OFF);
+    Serial.println("PowerMode::WIRELESS_OFF");
+  }
+  else
+  {
+    emotibit.setPowerMode(EmotiBit::PowerMode::NORMAL_POWER);
+    Serial.println("PowerMode::NORMAL_POWER");
+  }
+}
+
+void onLongButtonPress()
+{
+  emotibit.sleep();
 }
