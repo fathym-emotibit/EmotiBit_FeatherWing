@@ -59,8 +59,6 @@ void setup()
 
   configTime(0, 0, ntpServer);
 
-  loadLastLoopStartMillis();
-
   xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
 }
@@ -96,6 +94,8 @@ void ReadTaskRunner(void *pvParameters)
 
   for (;;)
   {
+    loadLastLoopStartMillis();
+
     emotibit.update();
 
     ReadTaskLoop();
@@ -135,12 +135,12 @@ void ReadTaskLoop()
 
       long loopStartMillis = lastLoopStartMillis[typeTag];
 
-      lastLoopStartMillis[typeTag] = millis();
-
-      serializeJson(lastLoopStartMillis, Serial);
-
       uint32_t timestamp;
       size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
+
+      lastLoopStartMillis[typeTag] = timestamp;
+
+      serializeJson(lastLoopStartMillis, Serial);
 
       if (dataAvailable > 0)
       {
@@ -323,7 +323,7 @@ void loadLastLoopStartMillis()
 
   for (JsonVariant readingValue : readingValues)
   {
-    lastLoopStartMillis[readingValue.as<string>()] = millis();
+    lastLoopStartMillis[readingValue.as<String>()] = millis();
   }
 
   Serial.println("Hey Right Here!");
