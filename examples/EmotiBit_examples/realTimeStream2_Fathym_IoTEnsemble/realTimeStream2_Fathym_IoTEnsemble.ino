@@ -6,16 +6,17 @@
 // #include "EmotiBitNvmController.h"
 // #include <Wire.h>
 
-#define SerialUSB SERIAL_PORT_USBVIRTUAL                           // Required to work in Visual Micro / Visual Studio IDE
-#define BATCH_SIZE (10)                                            // The number of messages to batch into a single call
-#define HUB_MESSAGE_MAX_LEN (1000 * 250)                           // Set to a little short of max size of IoT Hub Messages (256 KB)
-#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)        // The max size of a single payload
-#define PAYLOADS_MAX_SIZE (HUB_MESSAGE_MAX_LEN - PAYLOAD_MAX_SIZE) // The maximum size
+#define SerialUSB SERIAL_PORT_USBVIRTUAL                                 // Required to work in Visual Micro / Visual Studio IDE
+#define BATCH_SIZE (50)                                                  // The number of messages to batch into a single call
+#define HUB_MESSAGE_MAX_LEN (1000 * 256)                                 // Set to max size of IoT Hub Messages (256 KB)
+#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)              // The max size of a single payload ~5kb
+#define PAYLOADS_MAX_SIZE (HUB_MESSAGE_MAX_LEN - (PAYLOAD_MAX_SIZE * 3)) // The maximum size of all collected payloads
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
 EmotiBit emotibit;
 EmotiBitVersionController emotibitVersionController;
 EmotiBitVersionController::EmotiBitVersion emotibitVersion;
+String version;
 
 TaskHandle_t ReadTask;
 TaskHandle_t CaptureTask;
@@ -23,9 +24,11 @@ TaskHandle_t CaptureTask;
 StaticJsonDocument<1024> config;
 unsigned long epochTime;
 const char *ntpServer = "pool.ntp.org";
-String version;
+
 StaticJsonDocument<1024> lastLoopStartMillisDoc;
 JsonObject lastLoopStartMillis;
+StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadsDoc;
+JsonArray payloads = payloadsDoc.to<JsonArray>();
 
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
@@ -34,7 +37,9 @@ char fathymReadings[18][3] = {{}};
 int readingsInterval;
 
 int captureInterval;
+long captureTracking = 0;
 String fathymConnectionStringPtr;
+long lastCapture = 0;
 
 void setup()
 {
@@ -62,10 +67,18 @@ void setup()
 
   configTime(0, 0, ntpServer);
 
-  xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
-  xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
+  const char *connStr = fathymConnectionStringPtr.c_str();
+
+  if (!Esp32MQTTClient_Init((const uint8_t *)connStr, true))
+  {
+    Serial.println("Initializing IoT hub failed.");
+    return;
+  }
 
   loadLastLoopStartMillis();
+
+  xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
+  xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
 
   Serial.println("#################################");
   Serial.println("# Open Biotech Real Time Stream #");
@@ -83,10 +96,15 @@ void ReadTaskRunner(void *pvParameters)
   Serial.println(xPortGetCoreID());
 
   for (;;)
-  {   
+  {
+    Serial.println("ReadTask loop running");
+
     emotibit.update();
 
     ReadTaskLoop();
+
+    Serial.print("ReadTask loop complete, delaying for ");
+    Serial.println(readingsInterval);
 
     delay(readingsInterval);
   }
@@ -94,9 +112,7 @@ void ReadTaskRunner(void *pvParameters)
 
 void ReadTaskLoop()
 {
-  Serial.println("ReadTask loop running");
-
-  StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payload;
+  StaticJsonDocument<PAYLOAD_MAX_SIZE> payload;
 
   payload["DeviceID"] = fathymDeviceID;
 
@@ -106,17 +122,17 @@ void ReadTaskLoop()
 
   JsonObject payloadSensorReadings = payload.createNestedObject("SensorReadings");
 
-  JsonObject payloadSensorMetadata = payload.createNestedObject("SensorMetadata");
-
   epochTime = getTime();
 
   payloadDeviceData["Timestamp"] = String(epochTime);
 
   for (String typeTag : fathymReadings)
   {
-    // Serial.println("Inside For loop: ");
     if (typeTag != NULL)
     {
+      Serial.print("Reading type ");
+      Serial.pringln(typeTag);
+
       enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
 
       long loopStartMillis = lastLoopStartMillis[typeTag];
@@ -126,28 +142,21 @@ void ReadTaskLoop()
 
       lastLoopStartMillis[typeTag] = timestamp;
 
-      serializeJson(lastLoopStartMillis, Serial);
-
       if (dataAvailable > 0 && loopStartMillis > 0)
       {
-        long elapsedMillis = timestamp - loopStartMillis;
+        Serial.print(dataAvailable);
+        Serial.print(" data record(s) available reading type ");
+        Serial.pringln(typeTag);
 
-        Serial.print("Data Available for ");
-        Serial.println(typeTag);
-        Serial.print("\tDA: ");
-        Serial.println(dataAvailable);
-        Serial.print("\tLoopStartMillis: ");
-        Serial.println(loopStartMillis);
-        Serial.print("\tTimestamp: ");
-        Serial.println(timestamp);
-        Serial.print("\tElapsedMillis: ");
-        Serial.println(elapsedMillis);
+        long elapsedMillis = timestamp - loopStartMillis;
 
         JsonArray payloadSensorTypeReadings = payloadSensorReadings.createNestedArray(typeTag);
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
-          Serial.print("Reading for ");
+          Serial.print("Reading data record ");
+          Serial.print(i);
+          Serial.print(" for ");
           Serial.print(typeTag);
           Serial.println(": ");
 
@@ -155,20 +164,34 @@ void ReadTaskLoop()
           
           reading["Data"] = data[i];
 
-          Serial.print("Time math: ");
-          Serial.println(float(i + 1) / float(dataAvailable));
-          Serial.print("elapsedMillis: ");
-          Serial.println(String(elapsedMillis));
-
           reading["Millis"] = (float(i + 1) / float(dataAvailable)) * float(elapsedMillis);
 
           serializeJson(reading, Serial);
+          Serial.println("");
         }
       }
     }
   }
 
+  JsonObject payloadSensorMetadata = payload.createNestedObject("SensorMetadata");
+
+  float battVolt = emotibit.readBatteryVoltage();
+
+  payloadSensorMetadata["BatteryPercentage"] = emotibit.getBatteryPercent(battVolt);
+
+  payloadSensorMetadata["MACAddress"] = emotibit.getFeatherMacAddress();
+
+  payloadSensorMetadata["EmotibitVersion"] = version;
+
+  Serial.println("Queuing payload for capture: ");
+
+  //  Ensure payload is as small as possible before adding to capture set
+  payload.shrinkToFit();
+
+  payloads.add(payload);
+
   serializeJson(payload, Serial);
+  Serial.println("");
 }
 
 void CaptureTaskRunner(void *pvParameters)
@@ -178,15 +201,84 @@ void CaptureTaskRunner(void *pvParameters)
 
   for (;;)
   {
-    Serial.println("CaptureTask processing");
-    delay(captureInterval);
+    Serial.print("Calculating CaptureTask loop run with ");
+
+    float allocatedMemory = payloadsDoc.capacity();
+
+    Serial.print("allocated memory ");
+    Serial.print(allocatedMemory);
+
+    bool isMemoryAllocated = allocatedMemory >= 250;
+
+    Serial.print(" and capture tracking ");
+    Serial.println(captureTracking);
+
+    bool isCaptureInterval = captureTracking >= captureInterval;
+
+    if (isCaptureInterval || isMemoryAllocated)
+    {
+      Serial.print("CaptureTask loop running due to ");
+
+      if (isMemoryAllocated)
+      {
+        Serial.print("memory allocated");
+      }
+      else if (isCaptureInterval)
+      {
+        Serial.print("capture interval");
+      }
+
+      CaptureTaskLoop();
+
+      Serial.println("CaptureTask loop complete");
+
+      captureTracking = 0;
+
+      lastCapture = millis();
+    }
+    else
+    {
+      captureTracking = millis() - lastCapture;
+
+      //  Small delay to space out capture tracking checks
+      delay(10);
+    }
   }
+}
+
+void CaptureTaskLoop()
+{
+  StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadCapturesDoc;
+
+  JsonArray payloadCaptures = payloadCapturesDoc.to<JsonArray>();
+
+  //  Fill array for processing captures
+  payloadCaptures.set(payloads);
+
+  //  Immediately clear payloads so that new payloads can be read
+  payloadsDoc.clear();
+
+  for (JsonVariant payloadCapture : payloadCaptures)
+  {
+    char messagePayload[PAYLOAD_MAX_SIZE];
+
+    serializeJson(payloadCapture, messagePayload);
+
+    Serial.println("Capturing payload: ");
+
+    EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
+
+    Serial.println(messagePayload);
+
+    Esp32MQTTClient_SendEventInstance(message);
+  
+    Serial.println("Payload captured");
+}
 }
 
 // Loads the configuration from a file
 bool loadConfigFile(const char *filename)
 {
-  // Open file for reading
   File file = SD.open(filename);
 
   if (!file)
@@ -200,34 +292,19 @@ bool loadConfigFile(const char *filename)
   Serial.print("Parsing: ");
   Serial.println(filename);
 
-  // Parse the root object
   deserializeJson(config, file, DeserializationOption::NestingLimit(3));
-  // JsonObject root = jsonBuffer.parseObject(file);
-  // Serial.print("AFter deserialize: ");
+
   JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
-  // Serial.println("After reading values: ");
-  // int size = static_cast<int>(readingValues.size());
-  // Serial.println(size);
+
   const char *readings[18];
 
   Serial.println(readingValues.size());
   copyArray(readingValues, readings);
 
-  // Serial.println("After copy array: ");
-  // readingValues.copyTo(readings);
-  // Serial.println(sizeof fathymReadings / sizeof fathymReadings[0]);
-
-  // Serial.println(sizeof readings[0]);
-
-  // Serial.println(sizeof readingValues / sizeof readingValues[0]);
-  // Serial.println(
   for (int i = 0; i < readingValues.size(); i++)
   {
     strcpy(fathymReadings[i], readings[i]);
   }
-
-  // Serial.print("After copying readings: ");
-  // }
 
   if (config.isNull())
   {
@@ -237,19 +314,11 @@ bool loadConfigFile(const char *filename)
 
   fathymConnectionStringPtr = config["Fathym"]["ConnectionString"].as<String>();
 
-  // Serial.print("After conn: ");
-
   fathymDeviceID = config["Fathym"]["DeviceID"].as<String>();
-
-  // Serial.print("After deviceid: ");
 
   readingsInterval = config["Fathym"]["ReadingInterval"] | 10;
 
-  // Serial.print("After reading interval: ");
-
   captureInterval = config["Fathym"]["CaptureInterval"] | 5000;
-
-  // Serial.print("After capture interval: ");
 
   // Close the file (File's destructor doesn't close the file)
   // ToDo: Handle multiple credentials
@@ -258,6 +327,10 @@ bool loadConfigFile(const char *filename)
 
   Serial.println("Serialized Config: ");
   serializeJson(config, Serial);
+  Serial.println("");
+  Serial.print("Config memory usage: ");
+  Serial.println(config.memoryUsage());
+
   return true;
 }
 
@@ -303,27 +376,16 @@ EmotiBit::DataType loadDataTypeFromTypeTag(String typeTag)
 
 void loadLastLoopStartMillis()
 {
+  Serial.println("Initializing last loop start millis for tracking");
+
   lastLoopStartMillis = lastLoopStartMillisDoc.to<JsonObject>();
 
   JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
-
-  Serial.println("Serialized reading values: ");
-  serializeJson(readingValues, Serial);
 
   for (JsonVariant readingValue : readingValues)
   {
     lastLoopStartMillis[readingValue.as<String>()] = millis();
   }
-
-  //for (int i = 0; i < readingValues.size(); i++)
-  //{
-    //Serial.println("readingValues[i]: ");
-    //Serial.println(String(readingValues[i]));
-    //lastLoopStartMillis[readingValues[i]] = millis();
-  //}
-  Serial.println("Hey Right Here!");
-
-  serializeJson(lastLoopStartMillis, Serial);
 }
 
 // Function that gets current epoch time
