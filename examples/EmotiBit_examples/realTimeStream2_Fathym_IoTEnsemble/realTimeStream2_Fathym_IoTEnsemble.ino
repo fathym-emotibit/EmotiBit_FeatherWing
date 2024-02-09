@@ -59,7 +59,7 @@ void setup()
 
   configTime(0, 0, ntpServer);
 
-  loadLastLoopStartMillis();
+  
 
   xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
@@ -94,8 +94,10 @@ void ReadTaskRunner(void *pvParameters)
   Serial.print("ReadTask running on core ");
   Serial.println(xPortGetCoreID());
 
+  loadLastLoopStartMillis();
+
   for (;;)
-  {
+  {   
     emotibit.update();
 
     ReadTaskLoop();
@@ -107,8 +109,6 @@ void ReadTaskRunner(void *pvParameters)
 void ReadTaskLoop()
 {
   Serial.println("ReadTask loop running");
-
-  loadLastLoopStartMillis();
 
   StaticJsonDocument<1024> payload;
 
@@ -135,12 +135,12 @@ void ReadTaskLoop()
 
       long loopStartMillis = lastLoopStartMillis[typeTag];
 
-      lastLoopStartMillis[typeTag] = millis();
-
-      serializeJson(lastLoopStartMillis, Serial);
-
       uint32_t timestamp;
       size_t dataAvailable = emotibit.readData((EmotiBit::DataType)dataType, &data[0], dataSize, timestamp);
+
+      lastLoopStartMillis[typeTag] = timestamp;
+
+      serializeJson(lastLoopStartMillis, Serial);
 
       if (dataAvailable > 0)
       {
@@ -161,25 +161,25 @@ void ReadTaskLoop()
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
-          // Serial.print("Reading for ");
-          // Serial.print(typeTag);
-          // Serial.println(": ");
+          Serial.print("Reading for ");
+          Serial.print(typeTag);
+          Serial.println(": ");
 
           JsonObject reading = payloadSensorTypeReadings.createNestedObject();
           
           reading["Data"] = data[i];
 
-          // Serial.print("Time math: ");
-          // Serial.println(String((i + 1) / dataAvailable));
-          // Serial.print("elapsedMillis: ");
-          // Serial.println(String(elapsedMillis));
+          Serial.print("Time math: ");
+          Serial.println(float(i + 1) / float(dataAvailable));
+          Serial.print("elapsedMillis: ");
+          Serial.println(String(elapsedMillis));
 
-          reading["Millis"] = ((i + 1) / dataAvailable) * elapsedMillis;
+          reading["Millis"] = (float(i + 1) / float(dataAvailable)) * float(elapsedMillis);
 
-          // serializeJson(reading, Serial);
+          serializeJson(reading, Serial);
         }
 
-        payloadSensorReadings[typeTag] = String(data[0]);
+        //payloadSensorReadings[typeTag] = String(data[0]);
       }
     }
   }
@@ -272,6 +272,8 @@ bool loadConfigFile(const char *filename)
 
   file.close();
 
+  Serial.println("Serialized Config: ");
+  serializeJson(config, Serial);
   return true;
 }
 
@@ -321,11 +323,20 @@ void loadLastLoopStartMillis()
 
   JsonArray readingValues = config["Fathym"]["Readings"].as<JsonArray>();
 
+  Serial.println("Serialized reading values: ");
+  serializeJson(readingValues, Serial);
+
   for (JsonVariant readingValue : readingValues)
   {
-    lastLoopStartMillis[readingValue.as<string>()] = millis();
+    lastLoopStartMillis[readingValue.as<String>()] = millis();
   }
 
+  //for (int i = 0; i < readingValues.size(); i++)
+  //{
+    //Serial.println("readingValues[i]: ");
+    //Serial.println(String(readingValues[i]));
+    //lastLoopStartMillis[readingValues[i]] = millis();
+  //}
   Serial.println("Hey Right Here!");
 
   serializeJson(lastLoopStartMillis, Serial);
