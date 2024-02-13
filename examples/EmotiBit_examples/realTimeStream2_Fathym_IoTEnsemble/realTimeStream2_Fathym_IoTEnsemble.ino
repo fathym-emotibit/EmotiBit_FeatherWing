@@ -65,22 +65,12 @@ void setup()
     Serial.println("{\"WifiCredentials\": [{\"ssid\": \"SSSS\", \"password\" : \"PPPP\"}],\"Fathym\":{\"ConnectionString\": \"xxx\", \"DeviceID\": \"yyy\"}}");
   }
 
-  const char *connStr = fathymConnectionStringPtr.c_str();
-
-  if (!Esp32MQTTClient_Init((const uint8_t *)connStr, true))
-  {
-    Serial.println("Initializing IoT hub failed.");
-    return;
-  }
-
   configTime(0, 0, ntpServer);
 
   loadLastLoopStartMillis();
 
   xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 2, &ReadTask, 0);
-  delay(500);
   xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 2, &CaptureTask, 1);
-  delay(500);
 
   Serial.println("#################################");
   Serial.println("# Open Biotech Real Time Stream #");
@@ -97,6 +87,8 @@ void ReadTaskRunner(void *pvParameters)
 {
   Serial.print("ReadTask running on core ");
   Serial.println(xPortGetCoreID());
+
+  delay(500);
 
   for (;;)
   {
@@ -204,6 +196,16 @@ void CaptureTaskRunner(void *pvParameters)
 {
   Serial.print("CaptureTask running on core ");
   Serial.println(xPortGetCoreID());
+
+  delay(500);
+
+  const char *connStr = fathymConnectionStringPtr.c_str();
+
+  if (!Esp32MQTTClient_Init((const uint8_t *)connStr, true))
+  {
+    Serial.println("Initializing IoT hub failed.");
+    return;
+  }
 
   for (;;)
   {
