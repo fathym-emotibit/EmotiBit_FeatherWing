@@ -29,6 +29,8 @@ StaticJsonDocument<1024> lastLoopStartMillisDoc;
 JsonObject lastLoopStartMillis;
 StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadsDoc;
 JsonArray payloads = payloadsDoc.to<JsonArray>();
+StaticJsonDocument<PAYLOAD_MAX_SIZE> payloadDoc;
+JsonArray payload = payloadDoc.to<JsonObject>();
 StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadCapturesDoc;
 JsonArray payloadCaptures = payloadCapturesDoc.to<JsonArray>();
 
@@ -110,8 +112,6 @@ void ReadTaskRunner(void *pvParameters)
 
 void ReadTaskLoop()
 {
-  StaticJsonDocument<PAYLOAD_MAX_SIZE> payload;
-
   payload["DeviceID"] = fathymDeviceID;
 
   payload["DeviceType"] = "emotibit";
@@ -190,6 +190,9 @@ void ReadTaskLoop()
   readLogs &&Serial.println(payload.memoryUsage());
 
   payloads.add(payload);
+
+  payloadDoc.clear();
+  payloadDoc.garbageCollect();
 
   readLogs &&serializeJson(payload, Serial);
   readLogs &&Serial.println("");
