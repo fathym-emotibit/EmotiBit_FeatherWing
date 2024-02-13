@@ -94,7 +94,7 @@ void ReadTaskRunner(void *pvParameters)
 
     emotibit.update();
 
-    //ReadTaskLoop();
+    ReadTaskLoop();
 
     Serial.print("ReadTask loop complete, delaying for ");
     Serial.println(readingsInterval);
@@ -236,7 +236,7 @@ void CaptureTaskRunner(void *pvParameters)
         Serial.print("capture interval");
       }
 
-      //CaptureTaskLoop();
+      CaptureTaskLoop();
 
       Serial.println("CaptureTask loop complete");
 
