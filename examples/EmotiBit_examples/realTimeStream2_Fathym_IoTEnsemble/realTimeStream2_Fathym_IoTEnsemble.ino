@@ -124,6 +124,18 @@ void ReadTaskLoop()
 
   payloadDeviceData["Timestamp"] = String(epochTime);
 
+  JsonObject payloadSensorMetadata = payload.createNestedObject("SensorMetadata");
+
+  float battVolt = emotibit.readBatteryVoltage();
+
+  payloadSensorMetadata["BatteryPercentage"] = emotibit.getBatteryPercent(battVolt);
+
+  payloadSensorMetadata["MACAddress"] = emotibit.getFeatherMacAddress();
+
+  payloadSensorMetadata["EmotibitVersion"] = version;
+
+  bool hasReadings = false;
+
   for (String typeTag : fathymReadings)
   {
     if (typeTag != NULL)
@@ -142,6 +154,8 @@ void ReadTaskLoop()
 
       if (dataAvailable > 0 && loopStartMillis > 0)
       {
+        hasReadings = true;
+
         readLogs &&Serial.print(dataAvailable);
         readLogs &&Serial.print(" data record(s) available reading type ");
         readLogs &&Serial.println(typeTag);
@@ -171,31 +185,24 @@ void ReadTaskLoop()
     }
   }
 
-  JsonObject payloadSensorMetadata = payload.createNestedObject("SensorMetadata");
+  if (hasReadings)
+  {
+    readLogs &&Serial.println("Queuing payload for capture: ");
 
-  float battVolt = emotibit.readBatteryVoltage();
+    //  Ensure payload is as small as possible before adding to capture set
+    // payload.shrinkToFit();
 
-  payloadSensorMetadata["BatteryPercentage"] = emotibit.getBatteryPercent(battVolt);
+    readLogs &&Serial.print("Payload Memory Usage: ");
+    readLogs &&Serial.println(payload.memoryUsage());
 
-  payloadSensorMetadata["MACAddress"] = emotibit.getFeatherMacAddress();
+    payloads.add(payload);
 
-  payloadSensorMetadata["EmotibitVersion"] = version;
-
-  readLogs &&Serial.println("Queuing payload for capture: ");
-
-  //  Ensure payload is as small as possible before adding to capture set
-  //payload.shrinkToFit();
-
-  readLogs &&Serial.print("Payload Memory Usage: ");
-  readLogs &&Serial.println(payload.memoryUsage());
-
-  payloads.add(payload);
+    readLogs &&serializeJson(payload, Serial);
+    readLogs &&Serial.println("");
+  }
 
   payloadDoc.clear();
   payloadDoc.garbageCollect();
-
-  readLogs &&serializeJson(payload, Serial);
-  readLogs &&Serial.println("");
 }
 
 void CaptureTaskRunner(void *pvParameters)
