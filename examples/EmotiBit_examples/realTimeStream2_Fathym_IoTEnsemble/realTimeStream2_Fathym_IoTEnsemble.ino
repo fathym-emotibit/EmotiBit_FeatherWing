@@ -30,7 +30,7 @@ JsonObject lastLoopStartMillis;
 StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadsDoc;
 JsonArray payloads = payloadsDoc.to<JsonArray>();
 StaticJsonDocument<PAYLOAD_MAX_SIZE> payloadDoc;
-JsonArray payload = payloadDoc.to<JsonObject>();
+JsonObject payload = payloadDoc.to<JsonObject>();
 StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadCapturesDoc;
 JsonArray payloadCaptures = payloadCapturesDoc.to<JsonArray>();
 
