@@ -86,6 +86,8 @@ void ReadTaskRunner(void *pvParameters)
   Serial.print("ReadTask running on core ");
   Serial.println(xPortGetCoreID());
 
+  delay(500);
+
   for (;;)
   {
     Serial.println("ReadTask loop running");
@@ -202,6 +204,8 @@ void CaptureTaskRunner(void *pvParameters)
   }
 
   configTime(0, 0, ntpServer);
+
+  delay(500);
 
   for (;;)
   {
