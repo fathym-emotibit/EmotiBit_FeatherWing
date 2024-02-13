@@ -8,7 +8,7 @@
 
 #define SerialUSB SERIAL_PORT_USBVIRTUAL                                 // Required to work in Visual Micro / Visual Studio IDE
 #define BATCH_SIZE (10)                                                  // The number of messages to batch into a single call
-#define HUB_MESSAGE_MAX_LEN (1000 * 50)                                  // Set to max size of IoT Hub Messages (256 KB)
+#define HUB_MESSAGE_MAX_LEN (1000 * 32)                                  // Set to max size of IoT Hub Messages (256 KB)
 #define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)              // The max size of a single payload ~5kb
 #define PAYLOADS_MAX_SIZE (HUB_MESSAGE_MAX_LEN - (PAYLOAD_MAX_SIZE * 3)) // The maximum size of all collected payloads
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
@@ -29,6 +29,8 @@ StaticJsonDocument<1024> lastLoopStartMillisDoc;
 JsonObject lastLoopStartMillis;
 StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadsDoc;
 JsonArray payloads = payloadsDoc.to<JsonArray>();
+StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadCapturesDoc;
+JsonArray payloadCaptures = payloadCapturesDoc.to<JsonArray>();
 
 const size_t dataSize = EmotiBit::MAX_DATA_BUFFER_SIZE;
 float data[dataSize];
@@ -259,15 +261,12 @@ void CaptureTaskRunner(void *pvParameters)
 
 void CaptureTaskLoop()
 {
-  StaticJsonDocument<HUB_MESSAGE_MAX_LEN> payloadCapturesDoc;
-
-  JsonArray payloadCaptures = payloadCapturesDoc.to<JsonArray>();
-
   //  Fill array for processing captures
   payloadCaptures.set(payloads);
 
   //  Immediately clear payloads so that new payloads can be read
   payloadsDoc.clear();
+  payloadsDoc.garbageCollect();
 
   for (JsonVariant payloadCapture : payloadCaptures)
   {
@@ -285,6 +284,9 @@ void CaptureTaskLoop()
 
     captureLogs &&Serial.println("Payload captured");
   }
+
+  payloadCapturesDoc.clear();
+  payloadCapturesDoc.garbageCollect();
 }
 
 // Loads the configuration from a file
