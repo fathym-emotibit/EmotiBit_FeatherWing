@@ -7,9 +7,9 @@
 // #include <Wire.h>
 
 #define SerialUSB SERIAL_PORT_USBVIRTUAL                                 // Required to work in Visual Micro / Visual Studio IDE
-#define BATCH_SIZE (50)                                                  // The number of messages to batch into a single call
-#define HUB_MESSAGE_MAX_LEN (1000 * 256)                                 // Set to max size of IoT Hub Messages (256 KB)
-#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)              // The max size of a single payload ~5kb
+#define BATCH_SIZE (25)                                                  // The number of messages to batch into a single call
+#define HUB_MESSAGE_MAX_LEN (1000 * 64)                                  // Set to max size of IoT Hub Messages (256 KB)
+#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)              // The max size of a single payload ~2.5kb
 #define PAYLOADS_MAX_SIZE (HUB_MESSAGE_MAX_LEN - (PAYLOAD_MAX_SIZE * 3)) // The maximum size of all collected payloads
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
@@ -65,8 +65,6 @@ void setup()
     Serial.println("{\"WifiCredentials\": [{\"ssid\": \"SSSS\", \"password\" : \"PPPP\"}],\"Fathym\":{\"ConnectionString\": \"xxx\", \"DeviceID\": \"yyy\"}}");
   }
 
-  configTime(0, 0, ntpServer);
-
   const char *connStr = fathymConnectionStringPtr.c_str();
 
   if (!Esp32MQTTClient_Init((const uint8_t *)connStr, true))
@@ -74,6 +72,8 @@ void setup()
     Serial.println("Initializing IoT hub failed.");
     return;
   }
+
+  configTime(0, 0, ntpServer);
 
   loadLastLoopStartMillis();
 
@@ -186,7 +186,7 @@ void ReadTaskLoop()
   Serial.println("Queuing payload for capture: ");
 
   //  Ensure payload is as small as possible before adding to capture set
-  payload.shrinkToFit();
+  // payload.shrinkToFit();
 
   payloads.add(payload);
 
