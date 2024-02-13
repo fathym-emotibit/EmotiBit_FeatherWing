@@ -41,6 +41,9 @@ long captureTracking = 0;
 String fathymConnectionStringPtr;
 long lastCapture = 0;
 
+bool readLogs = true;
+bool captureLogs = true;
+
 void setup()
 {
   Serial.begin(SERIAL_BAUD);
@@ -83,21 +86,21 @@ void loop()
 
 void ReadTaskRunner(void *pvParameters)
 {
-  Serial.print("ReadTask running on core ");
-  Serial.println(xPortGetCoreID());
+  readLogs &&Serial.print("ReadTask running on core ");
+  readLogs &&Serial.println(xPortGetCoreID());
 
   delay(500);
 
   for (;;)
   {
-    Serial.println("ReadTask loop running");
+    readLogs &&Serial.println("ReadTask loop running");
 
     emotibit.update();
 
     ReadTaskLoop();
 
-    Serial.print("ReadTask loop complete, delaying for ");
-    Serial.println(readingsInterval);
+    readLogs &&Serial.print("ReadTask loop complete, delaying for ");
+    readLogs &&Serial.println(readingsInterval);
 
     delay(readingsInterval);
   }
@@ -123,8 +126,8 @@ void ReadTaskLoop()
   {
     if (typeTag != NULL)
     {
-      Serial.print("Reading type ");
-      Serial.println(typeTag);
+      readLogs &&Serial.print("Reading type ");
+      readLogs &&Serial.println(typeTag);
 
       enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
 
@@ -137,9 +140,9 @@ void ReadTaskLoop()
 
       if (dataAvailable > 0 && loopStartMillis > 0)
       {
-        Serial.print(dataAvailable);
-        Serial.print(" data record(s) available reading type ");
-        Serial.println(typeTag);
+        readLogs &&Serial.print(dataAvailable);
+        readLogs &&Serial.print(" data record(s) available reading type ");
+        readLogs &&Serial.println(typeTag);
 
         long elapsedMillis = timestamp - loopStartMillis;
 
@@ -147,11 +150,11 @@ void ReadTaskLoop()
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
-          Serial.print("Reading data record ");
-          Serial.print(i);
-          Serial.print(" for ");
-          Serial.print(typeTag);
-          Serial.println(": ");
+          readLogs &&Serial.print("Reading data record ");
+          readLogs &&Serial.print(i);
+          readLogs &&Serial.print(" for ");
+          readLogs &&Serial.print(typeTag);
+          readLogs &&Serial.println(": ");
 
           JsonObject reading = payloadSensorTypeReadings.createNestedObject();
           
@@ -159,7 +162,7 @@ void ReadTaskLoop()
 
           reading["Millis"] = (float(i + 1) / float(dataAvailable)) * float(elapsedMillis);
 
-          serializeJson(reading, Serial);
+          readLogs &&serializeJson(reading, Serial);
           Serial.println("");
         }
       }
@@ -181,25 +184,25 @@ void ReadTaskLoop()
   //  Ensure payload is as small as possible before adding to capture set
   //payload.shrinkToFit();
 
-  Serial.print("Payload Memory Usage: ");
-  Serial.println(payload.memoryUsage());
+  readLogs &&Serial.print("Payload Memory Usage: ");
+  readLogs &&Serial.println(payload.memoryUsage());
 
   payloads.add(payload);
 
-  serializeJson(payload, Serial);
-  Serial.println("");
+  readLogs &&serializeJson(payload, Serial);
+  readLogs &&Serial.println("");
 }
 
 void CaptureTaskRunner(void *pvParameters)
 {
-  Serial.print("CaptureTask running on core ");
-  Serial.println(xPortGetCoreID());
+  captureLogs &&Serial.print("CaptureTask running on core ");
+  captureLogs &&Serial.println(xPortGetCoreID());
 
   const char *connStr = fathymConnectionStringPtr.c_str();
 
   if (!Esp32MQTTClient_Init((const uint8_t *)connStr, true))
   {
-    Serial.println("Initializing IoT hub failed.");
+    captureLogs &&Serial.println("Initializing IoT hub failed.");
     return;
   }
 
@@ -213,32 +216,32 @@ void CaptureTaskRunner(void *pvParameters)
 
     float allocatedMemory = payloadsDoc.memoryUsage();
 
-    Serial.print("allocated memory ");
-    Serial.print(allocatedMemory);
+    captureLogs &&Serial.print("allocated memory ");
+    captureLogs &&Serial.print(allocatedMemory);
 
     bool isMemoryAllocated = allocatedMemory >= PAYLOADS_MAX_SIZE;
 
-    Serial.print(" and capture tracking ");
-    Serial.println(captureTracking);
+    captureLogs &&Serial.print(" and capture tracking ");
+    captureLogs &&Serial.println(captureTracking);
 
     bool isCaptureInterval = captureTracking >= captureInterval;
 
     if (isCaptureInterval || isMemoryAllocated)
     {
-      Serial.print("CaptureTask loop running due to ");
+      captureLogs &&Serial.print("CaptureTask loop running due to ");
 
       if (isMemoryAllocated)
       {
-        Serial.print("memory allocated");
+        captureLogs &&Serial.print("memory allocated");
       }
       else if (isCaptureInterval)
       {
-        Serial.print("capture interval");
+        captureLogs &&Serial.print("capture interval");
       }
 
       CaptureTaskLoop();
 
-      Serial.println("CaptureTask loop complete");
+      captureLogs &&Serial.println("CaptureTask loop complete");
 
       captureTracking = 0;
 
@@ -270,17 +273,17 @@ void CaptureTaskLoop()
   {
     char messagePayload[PAYLOAD_MAX_SIZE];
 
-    serializeJson(payloadCapture, messagePayload);
+    captureLogs &&serializeJson(payloadCapture, messagePayload);
 
-    Serial.println("Capturing payload: ");
+    captureLogs &&Serial.println("Capturing payload: ");
 
     EVENT_INSTANCE *message = Esp32MQTTClient_Event_Generate(messagePayload, MESSAGE);
 
-    Serial.println(messagePayload);
+    captureLogs &&Serial.println(messagePayload);
 
     Esp32MQTTClient_SendEventInstance(message);
-  
-    Serial.println("Payload captured");
+
+    captureLogs &&Serial.println("Payload captured");
   }
 }
 
