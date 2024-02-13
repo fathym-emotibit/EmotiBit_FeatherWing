@@ -7,9 +7,9 @@
 // #include <Wire.h>
 
 #define SerialUSB SERIAL_PORT_USBVIRTUAL                                 // Required to work in Visual Micro / Visual Studio IDE
-#define BATCH_SIZE (25)                                                  // The number of messages to batch into a single call
-#define HUB_MESSAGE_MAX_LEN (1000 * 64)                                  // Set to max size of IoT Hub Messages (256 KB)
-#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)              // The max size of a single payload ~2.5kb
+#define BATCH_SIZE (10)                                                  // The number of messages to batch into a single call
+#define HUB_MESSAGE_MAX_LEN (1000 * 64)                                 // Set to max size of IoT Hub Messages (256 KB)
+#define PAYLOAD_MAX_SIZE (HUB_MESSAGE_MAX_LEN / BATCH_SIZE)              // The max size of a single payload ~5kb
 #define PAYLOADS_MAX_SIZE (HUB_MESSAGE_MAX_LEN - (PAYLOAD_MAX_SIZE * 3)) // The maximum size of all collected payloads
 const uint32_t SERIAL_BAUD = 2000000;    // 115200
 
@@ -77,8 +77,10 @@ void setup()
 
   loadLastLoopStartMillis();
 
-  xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 1, &ReadTask, 0);
-  xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 1, &CaptureTask, 1);
+  xTaskCreatePinnedToCore(ReadTaskRunner, "ReadTask", 10000, NULL, 2, &ReadTask, 0);
+  delay(500);
+  xTaskCreatePinnedToCore(CaptureTaskRunner, "CaptureTask", 10000, NULL, 2, &CaptureTask, 1);
+  delay(500);
 
   Serial.println("#################################");
   Serial.println("# Open Biotech Real Time Stream #");
@@ -87,6 +89,7 @@ void setup()
 
 void loop()
 {
+  vTaskDelete(NULL);
   // TODO: Device Health Monitoring, cloud-to-device message handling, device twin syncing?
 }
 
@@ -101,7 +104,7 @@ void ReadTaskRunner(void *pvParameters)
 
     emotibit.update();
 
-    ReadTaskLoop();
+    //ReadTaskLoop();
 
     Serial.print("ReadTask loop complete, delaying for ");
     Serial.println(readingsInterval);
@@ -131,7 +134,7 @@ void ReadTaskLoop()
     if (typeTag != NULL)
     {
       Serial.print("Reading type ");
-      Serial.pringln(typeTag);
+      Serial.println(typeTag);
 
       enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
 
@@ -146,7 +149,7 @@ void ReadTaskLoop()
       {
         Serial.print(dataAvailable);
         Serial.print(" data record(s) available reading type ");
-        Serial.pringln(typeTag);
+        Serial.println(typeTag);
 
         long elapsedMillis = timestamp - loopStartMillis;
 
@@ -186,8 +189,11 @@ void ReadTaskLoop()
   Serial.println("Queuing payload for capture: ");
 
   //  Ensure payload is as small as possible before adding to capture set
-  // payload.shrinkToFit();
+  //payload.shrinkToFit();
 
+  Serial.print("Payload Memory Usage: ");
+  Serial.println(payload.memoryUsage());
+  
   payloads.add(payload);
 
   serializeJson(payload, Serial);
@@ -203,12 +209,12 @@ void CaptureTaskRunner(void *pvParameters)
   {
     Serial.print("Calculating CaptureTask loop run with ");
 
-    float allocatedMemory = payloadsDoc.capacity();
+    float allocatedMemory = payloadsDoc.memoryUsage();
 
     Serial.print("allocated memory ");
     Serial.print(allocatedMemory);
 
-    bool isMemoryAllocated = allocatedMemory >= 250;
+    bool isMemoryAllocated = allocatedMemory >= PAYLOADS_MAX_SIZE;
 
     Serial.print(" and capture tracking ");
     Serial.println(captureTracking);
@@ -228,7 +234,7 @@ void CaptureTaskRunner(void *pvParameters)
         Serial.print("capture interval");
       }
 
-      CaptureTaskLoop();
+      //CaptureTaskLoop();
 
       Serial.println("CaptureTask loop complete");
 
