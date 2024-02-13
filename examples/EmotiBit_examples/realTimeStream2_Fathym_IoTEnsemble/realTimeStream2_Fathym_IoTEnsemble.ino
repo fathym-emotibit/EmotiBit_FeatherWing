@@ -193,7 +193,7 @@ void ReadTaskLoop()
 
   Serial.print("Payload Memory Usage: ");
   Serial.println(payload.memoryUsage());
-  
+
   payloads.add(payload);
 
   serializeJson(payload, Serial);
@@ -279,7 +279,7 @@ void CaptureTaskLoop()
     Esp32MQTTClient_SendEventInstance(message);
   
     Serial.println("Payload captured");
-}
+  }
 }
 
 // Loads the configuration from a file
