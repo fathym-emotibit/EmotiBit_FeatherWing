@@ -45,8 +45,8 @@ long captureTracking = 0;
 String fathymConnectionStringPtr;
 long lastCapture = 0;
 
-bool readLogs = true;
-bool captureLogs = true;
+bool readingLogs = false;
+bool captureLogs = false;
 
 void setup()
 {
@@ -90,21 +90,21 @@ void loop()
 
 void ReadTaskRunner(void *pvParameters)
 {
-  readLogs &&Serial.print("ReadTask running on core ");
-  readLogs &&Serial.println(xPortGetCoreID());
+  readingLogs &&Serial.print("ReadTask running on core ");
+  readingLogs &&Serial.println(xPortGetCoreID());
 
   delay(500);
 
   for (;;)
   {
-    readLogs &&Serial.println("ReadTask loop running");
+    readingLogs &&Serial.println("ReadTask loop running");
 
     emotibit.update();
 
     ReadTaskLoop();
 
-    readLogs &&Serial.print("ReadTask loop complete, delaying for ");
-    readLogs &&Serial.println(readingsInterval);
+    readingLogs &&Serial.print("ReadTask loop complete, delaying for ");
+    readingLogs &&Serial.println(readingsInterval);
 
     delay(readingsInterval);
   }
@@ -140,8 +140,8 @@ void ReadTaskLoop()
   {
     if (typeTag != NULL)
     {
-      readLogs &&Serial.print("Reading type ");
-      readLogs &&Serial.println(typeTag);
+      readingLogs &&Serial.print("Reading type ");
+      readingLogs &&Serial.println(typeTag);
 
       enum EmotiBit::DataType dataType = loadDataTypeFromTypeTag(typeTag);
 
@@ -156,9 +156,9 @@ void ReadTaskLoop()
       {
         hasReadings = true;
 
-        readLogs &&Serial.print(dataAvailable);
-        readLogs &&Serial.print(" data record(s) available reading type ");
-        readLogs &&Serial.println(typeTag);
+        readingLogs &&Serial.print(dataAvailable);
+        readingLogs &&Serial.print(" data record(s) available reading type ");
+        readingLogs &&Serial.println(typeTag);
 
         long elapsedMillis = timestamp - loopStartMillis;
 
@@ -166,20 +166,22 @@ void ReadTaskLoop()
 
         for (size_t i = 0; i < dataAvailable && i < dataSize; i++)
         {
-          readLogs &&Serial.print("Reading data record ");
-          readLogs &&Serial.print(i);
-          readLogs &&Serial.print(" for ");
-          readLogs &&Serial.print(typeTag);
-          readLogs &&Serial.println(": ");
+          readingLogs &&Serial.print("Reading data record ");
+          readingLogs &&Serial.print(i);
+          readingLogs &&Serial.print(" for ");
+          readingLogs &&Serial.print(typeTag);
+          readingLogs &&Serial.println(": ");
 
           JsonObject reading = payloadSensorTypeReadings.createNestedObject();
           
           reading["Data"] = data[i];
 
-          reading["Millis"] = (float(i + 1) / float(dataAvailable)) * float(elapsedMillis);
+          float millis = (float(i + 1) / float(dataAvailable)) * float(elapsedMillis);
 
-          readLogs &&serializeJson(reading, Serial);
-          readLogs &&Serial.println("");
+          reading["Millis"] = round2(millis);
+
+          readingLogs &&serializeJson(reading, Serial);
+          readingLogs &&Serial.println("");
         }
       }
     }
@@ -187,18 +189,18 @@ void ReadTaskLoop()
 
   if (hasReadings)
   {
-    readLogs &&Serial.println("Queuing payload for capture: ");
+    readingLogs &&Serial.println("Queuing payload for capture: ");
 
     //  Ensure payload is as small as possible before adding to capture set
     // payload.shrinkToFit();
 
-    readLogs &&Serial.print("Payload Memory Usage: ");
-    readLogs &&Serial.println(payload.memoryUsage());
+    readingLogs &&Serial.print("Payload Memory Usage: ");
+    readingLogs &&Serial.println(payload.memoryUsage());
 
     payloads.add(payload);
 
-    readLogs &&serializeJson(payload, Serial);
-    readLogs &&Serial.println("");
+    readingLogs &&serializeJson(payload, Serial);
+    readingLogs &&Serial.println("");
   }
 
   payloadDoc.clear();
@@ -341,7 +343,11 @@ bool loadConfigFile(const char *filename)
 
   readingsInterval = config["Fathym"]["ReadingInterval"] | 10;
 
+  readingLogs = config["Fathym"]["ShowReadingLogs"] | false;
+
   captureInterval = config["Fathym"]["CaptureInterval"] | 5000;
+
+  captureLogs = config["Fathym"]["ShowCaptureLogs"] | false;
 
   // Close the file (File's destructor doesn't close the file)
   // ToDo: Handle multiple credentials
@@ -441,4 +447,8 @@ void onShortButtonPress()
 void onLongButtonPress()
 {
   emotibit.sleep();
+}
+
+float round2(float value) {
+   return (int)(value * 100 + 0.5) / 100.0;
 }
